@@ -66,25 +66,26 @@ CPU_CAP_GB = 7.0       # CPU-only PCs: bigger models than this are painfully slo
 # that downloads wins. "Unlocked" = abliterated / Dolphin-style fine-tunes with refusals removed;
 # the last entry of each list is a standard model used only if nothing unlocked can be downloaded.
 TIERS = [
-    # (min_gb, label, coder_tags, chat_tags)
+    # (min_gb, label, coder_tags, chat_tags)   -- every tag below was checked against the real Ollama registry
     (0, "tiny (<4 GB)",
-     ["huihui_ai/qwen2.5-coder-abliterated:1.5b", "qwen2.5-coder:1.5b"],
+     ["huihui_ai/qwen2.5-coder-abliterate:1.5b", "qwen2.5-coder:1.5b"],
      ["huihui_ai/qwen3-abliterated:1.7b", "qwen3:1.7b"]),
     (4, "small (4-6 GB)",
-     ["huihui_ai/qwen2.5-coder-abliterated:3b", "qwen2.5-coder:3b"],
-     ["huihui_ai/qwen3-abliterated:4b", "qwen3:4b"]),
+     ["huihui_ai/qwen2.5-coder-abliterate:3b", "qwen2.5-coder:3b"],
+     ["huihui_ai/gemma3-abliterated:4b", "huihui_ai/qwen3-abliterated:4b", "qwen3:4b"]),
     (6, "medium (6-10 GB)",
-     ["huihui_ai/qwen2.5-coder-abliterated:7b", "qwen2.5-coder:7b"],
+     ["huihui_ai/qwen2.5-coder-abliterate:7b", "qwen2.5-coder:7b"],
      ["huihui_ai/qwen3-abliterated:8b", "dolphin3:8b", "qwen3:8b"]),
     (10, "large (10-16 GB)",
-     ["huihui_ai/qwen2.5-coder-abliterated:14b", "qwen2.5-coder:14b"],
-     ["huihui_ai/qwen3-abliterated:14b", "dolphin3:8b", "qwen3:14b"]),
-    (16, "xlarge (16-28 GB)",
-     ["huihui_ai/qwen2.5-coder-abliterated:32b", "qwen2.5-coder:32b"],
-     ["huihui_ai/qwen3-abliterated:32b", "huihui_ai/qwen3-abliterated:14b", "qwen3:32b"]),
-    (28, "workstation (28+ GB)",
-     ["huihui_ai/qwen3-coder-abliterated:30b", "huihui_ai/qwen2.5-coder-abliterated:32b", "qwen3-coder:30b"],
-     ["huihui_ai/qwen3-abliterated:32b", "qwen3:32b"]),
+     ["huihui_ai/qwen2.5-coder-abliterate:14b", "qwen2.5-coder:14b"],
+     ["huihui_ai/gemma3-abliterated:12b", "huihui_ai/qwen3-abliterated:14b", "qwen3:14b"]),
+    (16, "xlarge (16-24 GB)",
+     ["huihui_ai/devstral-abliterated:24b", "huihui_ai/qwen2.5-coder-abliterate:14b", "qwen2.5-coder:14b"],
+     ["huihui_ai/mistral-small-abliterated:24b", "huihui_ai/gpt-oss-abliterated:20b",
+      "huihui_ai/qwen3-abliterated:14b", "qwen3:14b"]),
+    (24, "workstation (24+ GB)",
+     ["huihui_ai/qwen3-coder-abliterated:30b", "huihui_ai/qwen2.5-coder-abliterate:32b", "qwen3-coder:30b"],
+     ["huihui_ai/gemma3-abliterated:27b", "huihui_ai/qwen3-abliterated:32b", "qwen3:32b"]),
 ]
 EMBED_MODEL = "nomic-embed-text"  # for Continue codebase search
 AUTOCOMPLETE_TAGS = ["qwen2.5-coder:1.5b-base", "qwen2.5-coder:1.5b"]  # small + fast: typing suggestions

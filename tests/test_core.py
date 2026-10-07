@@ -109,7 +109,8 @@ class Research(unittest.TestCase):
     def test_recommend_tiers(self):
         self.assertTrue(lai.recommend({"usable_gb": 2})["tier"].startswith("tiny"))
         self.assertTrue(lai.recommend({"usable_gb": 8})["tier"].startswith("medium"))
-        self.assertTrue(lai.recommend({"usable_gb": 24})["tier"].startswith("xlarge"))
+        self.assertTrue(lai.recommend({"usable_gb": 20})["tier"].startswith("xlarge"))
+        self.assertTrue(lai.recommend({"usable_gb": 24})["tier"].startswith("workstation"))
         self.assertTrue(lai.recommend({"usable_gb": 64})["tier"].startswith("workstation"))
 
     def test_curated_lists_end_with_a_standard_fallback(self):
@@ -237,6 +238,61 @@ class Pulling(unittest.TestCase):
     def test_returns_none_when_nothing_works(self):
         got, _ = self.run_pull(["gone", "broken"], set())
         self.assertIsNone(got)
+
+
+class SelfUpdate(unittest.TestCase):
+    """The frozen .exe swaps itself for the newest script from GitHub."""
+
+    def run_update(self, remote_source):
+        with tempfile.TemporaryDirectory() as d:
+            saved = (lai.STATE_DIR, lai.fetch_text, sys.argv[:], os.environ.get("LAI_NO_SELF_UPDATE"),
+                     getattr(sys, "frozen", None))
+            lai.STATE_DIR = d
+            lai.fetch_text = lambda url, timeout=15: remote_source
+            os.environ.pop("LAI_NO_SELF_UPDATE", None)
+            sys.frozen = True
+            try:
+                try:
+                    result = lai.maybe_self_update(["--x"])
+                except SystemExit as e:
+                    result = ("exit", e.code)
+                marker = os.path.join(d, "marker.txt")
+                return result, os.path.exists(os.path.join(d, "latest", "local_ai_installer.py")), marker
+            finally:
+                lai.STATE_DIR, lai.fetch_text = saved[0], saved[1]
+                sys.argv[:] = saved[2]
+                if saved[3] is None:
+                    os.environ.pop("LAI_NO_SELF_UPDATE", None)
+                else:
+                    os.environ["LAI_NO_SELF_UPDATE"] = saved[3]
+                if saved[4] is None:
+                    del sys.frozen
+                else:
+                    sys.frozen = saved[4]
+
+    def test_runs_newer_script_and_passes_its_exit_code_through(self):
+        result, saved, _ = self.run_update('VERSION = "99.0.0"\nimport sys\nsys.exit(7)\n')
+        self.assertEqual(result, ("exit", 7))
+        self.assertTrue(saved)
+
+    def test_ignores_same_or_older_version(self):
+        result, saved, _ = self.run_update('VERSION = "%s"\nimport sys\nsys.exit(7)\n' % lai.VERSION)
+        self.assertIsNone(result)
+        self.assertFalse(saved)
+
+    def test_falls_back_to_bundled_version_if_newer_script_cannot_import(self):
+        result, _, _ = self.run_update('VERSION = "99.0.0"\nimport a_module_that_is_not_bundled\n')
+        self.assertIsNone(result)
+
+    def test_not_frozen_never_self_updates(self):
+        saved = getattr(sys, "frozen", None)
+        if saved is not None:
+            del sys.frozen
+        try:
+            self.assertIsNone(lai.maybe_self_update([]))
+        finally:
+            if saved is not None:
+                sys.frozen = saved
 
 
 class UvInstall(unittest.TestCase):

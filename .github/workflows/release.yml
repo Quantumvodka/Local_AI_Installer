@@ -66,8 +66,10 @@ jobs:
           python-version: "3.12"
       - run: pip install pyinstaller
       - run: pyinstaller --onefile --console --name LocalAIInstaller local_ai_installer.py
-      - name: Smoke test the built program
-        run: ${{ matrix.built }} --version
+      - name: Smoke test the built program (it must detect this machine and research offline)
+        run: |
+          ${{ matrix.built }} --version
+          ${{ matrix.built }} --dry-run --offline --no-self-update
       - run: python -c "import shutil; shutil.copy(r'${{ matrix.built }}', r'${{ matrix.name }}')"
       - uses: actions/upload-artifact@v4
         with:

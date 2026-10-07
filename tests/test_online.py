@@ -49,6 +49,7 @@ class Online(unittest.TestCase):
                 gone = [t for t in tags if t not in found]
                 missing += gone
                 self.assertTrue(found, f"tier '{label}' has no downloadable {group} model: {tags}")
+                self.assertIn(tags[0], found, f"tier '{label}': the primary {group} pick {tags[0]} no longer exists")
         for t in [lai.EMBED_MODEL]:
             self.assertTrue(ollama_tag_exists(t), t)
         self.assertTrue(any(ollama_tag_exists(t) for t in lai.AUTOCOMPLETE_TAGS))

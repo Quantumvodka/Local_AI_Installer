@@ -38,6 +38,20 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python tools/probe_tags.py
 
+      - name: Bootstrap script, real Windows PowerShell 5.1 (install.ps1 downloads THIS commit's installer, dry run)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          LAI_RAW: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.pull_request.head.sha || github.sha }}
+          LAI_ARGS: --dry-run --offline
+        run: ./install.ps1
+
+      - name: Bootstrap script (install.sh downloads THIS commit's installer, dry run)
+        if: runner.os != 'Windows'
+        env:
+          LAI_RAW: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.pull_request.head.sha || github.sha }}
+        run: sh install.sh --dry-run --offline
+
       - name: Launcher scripts parse (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

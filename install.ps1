@@ -3,7 +3,7 @@
 # Options: set them first, e.g.   $env:LAI_ARGS = "--dry-run"; irm ... | iex
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$raw = "https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main"
+$raw = if ($env:LAI_RAW) { $env:LAI_RAW } else { "https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main" }
 $env:PYTHONUTF8 = "1"
 
 function Test-Python($exe) {

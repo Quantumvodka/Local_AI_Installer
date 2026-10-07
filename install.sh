@@ -3,7 +3,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main/install.sh | sh
 # Options go after "-s --":   curl -fsSL ... | sh -s -- --dry-run
 set -e
-REPO_RAW="https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main"
+REPO_RAW="${LAI_RAW:-https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main}"
 export PYTHONUTF8=1
 
 py_ok() { "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; }
