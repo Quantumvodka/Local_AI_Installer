@@ -1,62 +1,88 @@
 # Local AI Installer
 
-One script that sizes up your PC and sets up an uncensored local AI for coding and chat.
+One click sets up a private, **uncensored AI on your own PC** for chatting and coding. Nothing is sent to anyone.
 
-1. **Detects** OS, CPU, RAM, GPU/VRAM (NVIDIA, AMD, Apple Silicon, CPU-only).
-2. **Picks** the best model tier for your memory: a coding model plus an "abliterated" (refusals removed) chat model, with fallbacks. The model list is researched live from Hugging Face every run (see below), with a built-in fallback list if offline.
-3. **Installs** Ollama, pulls the models, adds the Continue VS Code extension (pre-configured), and optionally Open WebUI (Docker).
-4. **Verifies** with a real prompt and prints how to use it.
+It looks at your hardware, researches the best current unlocked ("abliterated") models that fit it, installs everything, checks that it works, and **opens the chat in your browser**.
 
-## Download (easiest - send people this)
+## Download
 
-Go to the **[Releases page](https://github.com/Quantumvodka/Local_AI_Installer/releases/latest)** and download:
+Go to the **[latest release](https://github.com/Quantumvodka/Local_AI_Installer/releases/latest)**:
 
 | Your PC | Download | Then |
 |---|---|---|
-| Windows | `LocalAIInstaller-Windows.exe` (or `Install-Windows.bat`) | double-click. If SmartScreen warns, click *More info -> Run anyway* (the app is unsigned) |
-| Mac | `Install-Mac.command` | right-click -> Open (first time only) |
-| Linux | `Install-Linux.sh` | `sh Install-Linux.sh` |
+| **Windows** | `LocalAIInstaller-Windows.exe` | Double-click. If Windows says *"protected your PC"*: **More info -> Run anyway** (the app is not code-signed). |
+| Windows (alternative) | `Install-Windows.bat` | Double-click. Always fetches the newest version. |
+| **Mac** | `Install-Mac.zip` | Unzip, then **right-click `Install-Mac.command` -> Open** (first time only). |
+| **Linux** | `Install-Linux.sh` | `sh Install-Linux.sh` |
 
-The `.bat`/`.command`/`.sh` files are tiny launchers that fetch the latest installer; the `.exe`/binaries are self-contained.
+Or paste one line in a terminal:
 
-## Quick start (command line)
-
-**Windows** (PowerShell):
 ```powershell
+# Windows (PowerShell)
 irm https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main/install.ps1 | iex
 ```
-**macOS / Linux**:
 ```bash
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main/install.sh | sh
 ```
-Add `-s -- --dry-run` after `sh` (Linux/macOS) to preview without installing.
 
-## Manual use
+## What you get
 
-```bash
-python local_ai_installer.py --dry-run   # see what it would do
-python local_ai_installer.py             # install (asks first)
-python local_ai_installer.py -y --no-webui
-```
+1. **Detects** your OS, CPU, RAM and graphics card (NVIDIA, AMD, Apple Silicon, or CPU-only) and how much memory the AI can use.
+2. **Researches live** on Hugging Face for the newest unlocked models that fit that memory (see "How the research works"), with a built-in fallback list if you're offline.
+3. **Installs**:
+   - **Ollama**: the engine that runs the models (uses your GPU automatically).
+   - **A coding model, a chat model, a small fast autocomplete model** and a code-search model.
+   - **Open WebUI**: a ChatGPT-style chat in your browser (no Docker needed; it fetches its own Python).
+   - **VS Code + the Continue extension**, already pointed at your local models, for AI coding in your editor.
+4. **Checks everything works** (asks each model a question, tests the chat page) and fixes what it can.
+5. **Opens the chat** and puts a **"Local AI Chat"** shortcut on your Desktop and Start menu for next time.
 
-Requires Python 3.8+ only (no pip packages). Windows needs `winget`, macOS needs Homebrew, Linux uses the official Ollama installer (may ask for sudo).
+First time in the chat: click **Get started** and create a local account. It stays on your PC.
 
-## Updating (just run it again)
-Run the same launcher any time. If it finds a previous install (`~/.local_ai_installer/state.json`) it switches to **update mode**: it re-researches, and only if a new model scores at least 10% better than the one you have does it download it, update Ollama and Open WebUI, and verify before offering to delete the old model (`--prune` deletes it automatically). Nothing of yours is touched:
-- **Chats and settings** live in Open WebUI's Docker volume (`open-webui`) and are kept; new models just appear in its model list. Old chats keep their original model name, so switch the model in the dropdown to continue them with the new one.
-- **VS Code / Continue** config is re-pointed at the new models. If you have edited `~/.continue/config.yaml` yourself, it is left alone.
+## Updating
+
+Run the same download again. It finds your install and, only if a new model scores at least 10% better than yours, downloads it, updates Ollama and Open WebUI, checks it works, then offers to delete the old model (`--prune` does it automatically). The `.exe` also downloads the newest installer logic by itself when one is published.
+
+Your stuff is never touched:
+- **Chats and settings** live in `~/.local_ai_installer/webui-data` and survive every update. New models simply appear in the model list; older chats keep their original model name, so pick the new model from the dropdown to continue them.
+- **VS Code / Continue** is re-pointed at the new models. If you edited `~/.continue/config.yaml` yourself, it is left alone.
 - **Your code and projects** are never stored by this tool.
-- Models themselves are not "data": old and new coexist until you delete the old one.
 
 ## Storage
-The installer shows the estimated download size and your free space before installing, and stops if there isn't enough. Expect roughly **5-45 GB** depending on your hardware tier (+ ~4 GB for the optional Open WebUI). To keep models on another drive: `python local_ai_installer.py --models-dir D:\\AIModels`. Models can't run from Google Drive/OneDrive (too slow, and sync can corrupt files); the installer refuses cloud-synced folders. If Ollama is already running as a service, restart it after changing the models folder.
 
-## Notes
-- **How the live research works:** it searches Hugging Face for GGUF models tagged abliterated / uncensored / dolphin / heretic, reads each repo's real file sizes, keeps only quantizations that fit your usable memory (85%, leaving room for context), and ranks them by size-that-fits x quality of quant x recency (halves every 9 months, max 20 months old) x popularity. It then pulls the winner via `ollama pull hf.co/<repo>:<quant>`.
-- This is a heuristic, not a benchmark: no source gives a trustworthy "best model for your PC" ranking for unlocked models. Newer + bigger-that-fits + popular is a good proxy, not a guarantee.
-- If Hugging Face can't be reached (or `--offline`), it falls back to the curated `TIERS` list in the script.
-- "Unlocked" community models vary in quality and carry no safety guardrails; you are responsible for how you use them.
-- Review the script before running it: it downloads and runs the official installers.
+The installer shows how much space it needs and stops if you don't have enough. Expect roughly **6-50 GB** depending on your hardware tier. To keep models on another drive: `--models-dir D:\AIModels`. Models can't run from Google Drive / OneDrive (too slow, and syncing can corrupt them), so the installer refuses cloud-synced folders.
 
-## Disclaimer
-Provided as-is under the MIT license. Models are downloaded from third parties under their own licenses. Unlocked models have no content filtering; use them responsibly and legally.
+## Options
+
+```
+--dry-run        detect + research only, install nothing
+--check          health-check an existing install and repair it
+--launch         start everything and open the chat (what the shortcut runs)
+-y / --yes       no questions
+--offline        skip the live research (use the built-in list)
+--no-webui  --no-vscode  --no-open  --no-shortcut
+--models-dir DIR store models on another local drive
+--max-gb N       never pick models needing more than N GB (slow PCs)
+--prune          delete the old model after an upgrade
+```
+
+## How the research works
+
+It searches Hugging Face for GGUF models tagged abliterated / uncensored / dolphin / heretic / josiefied / unfiltered (no older than 20 months), reads each repo's real file sizes, keeps only quantizations that fit your usable memory (85%, leaving room for context), and ranks them by **parameters x quality of quantization x recency (halves every 9 months) x popularity**. The winner is downloaded with `ollama pull hf.co/<repo>:<quant>`; if that fails the next one is tried, then the built-in list.
+
+This is a heuristic, not a benchmark: nobody publishes a trustworthy "best unlocked model for your PC" ranking, so newer + bigger-that-fits + popular is a good proxy, not a guarantee. CPU-only PCs are capped at about 7 GB models because anything bigger is painfully slow.
+
+## Troubleshooting
+
+- Everything the installer does is written to **`~/.local_ai_installer/install.log`** (on Windows: `%USERPROFILE%\.local_ai_installer\install.log`). Open WebUI's own log is `webui.log` next to it. Send those if something fails.
+- `--check` re-tests everything and restarts whatever stopped.
+- The chat is only reachable from your own PC (it listens on `127.0.0.1`).
+
+## Safety and licence
+
+"Unlocked" community models have no content filtering and vary in quality; you are responsible for how you use them. Models are downloaded from third parties under their own licences. Review the code before running it: it downloads and runs the official installers for Ollama and uv. MIT licensed, provided as-is.
+
+## For developers
+
+`python -m unittest discover -s tests -v` runs the offline tests (`LAI_ONLINE=1` adds live Hugging Face / Ollama registry checks). CI runs them on Windows, macOS and Linux. The **End-to-end install test** workflow does a real install on all three. Raising `VERSION` in `local_ai_installer.py` and merging to `main` publishes a new release automatically.
