@@ -55,6 +55,31 @@ class Online(unittest.TestCase):
         self.assertTrue(any(ollama_tag_exists(t) for t in lai.AUTOCOMPLETE_TAGS))
         print("\nCurated tags that do NOT exist on the registry (fix or remove):", missing)
 
+    def test_gguf_builds_found_by_base_model(self):
+        """The Hugging Face 'quantized from' search the PewDiePie lookup relies on, on a model that has many."""
+        builds = lai.gguf_builds("Qwen/Qwen3-8B", lai.http_json)
+        print("\nGGUF builds of Qwen/Qwen3-8B by trusted makers:", [(r, len(f)) for r, f in builds])
+        self.assertTrue(builds, "the base_model:quantized search found no trusted GGUF build")
+        for rid, files in builds:
+            self.assertIn(rid.split("/")[0].lower(), lai.GGUF_MAKERS + ("qwen",))
+            self.assertTrue(lai.best_quant(files, 20.0), rid)
+
+    def test_pewdiepie_lookup_reaches_official_sources(self):
+        refs = lai.official_refs()
+        res = lai.pewdiepie_ai(8.0)
+        print("\nofficial sources reached:", refs["reached"], "| refs:", refs["hf"], refs["ollama"], "| result:", res)
+        self.assertNotEqual(res["status"], "unreachable")
+
+    def test_github_connector_download_exists(self):
+        asset = lai.gh_mcp_asset()
+        if not asset:
+            self.skipTest("no GitHub connector build for this machine")
+        req = urllib.request.Request(f"https://github.com/{lai.GH_MCP_REPO}/releases/latest/download/{asset}",
+                                     method="HEAD")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            self.assertEqual(r.status, 200)
+        print("\nrelease info (None if the GitHub API is rate-limited here):", lai.gh_mcp_release(asset))
+
 
 if __name__ == "__main__":
     unittest.main()

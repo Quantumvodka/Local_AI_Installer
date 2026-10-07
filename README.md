@@ -2,7 +2,7 @@
 
 One click sets up a private, **uncensored AI on your own PC** for chatting and coding. Nothing is sent to anyone.
 
-It looks at your hardware, researches the best current unlocked ("abliterated") models that fit it, installs everything, checks that it works, and **opens the chat in your browser**.
+It looks at your hardware, researches the best current unlocked ("abliterated") models that fit it, installs everything, checks that it works, and **opens the chat in your browser**. It also watches for **PewDiePie's own AI model (Ajax)** and installs it once it's officially out, and can add **Odysseus** (PewDiePie's AI workspace) and a **GitHub connection** for your AI.
 
 ## Download
 
@@ -40,31 +40,82 @@ curl -fsSL https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/mai
 
 First time in the chat: click **Get started** and create a local account. It stays on your PC.
 
+Optional extras (the installer asks; or pass the option):
+
+- **PewDiePie's AI (Ajax)**: checked automatically on every run, see below.
+- **Odysseus** (`--odysseus`): PewDiePie's open-source AI workspace: chat, agents that do things on your PC, deep research, documents, notes. Uses the same local models. Gets an **"Odysseus AI"** shortcut.
+- **GitHub for your AI** (`--github`): your AI can read your repos, issues and pull requests, in VS Code (Continue, Agent mode) and Odysseus.
+
+## PewDiePie's AI
+
+PewDiePie's own model is **Ajax**: a Qwen3.5-9B fine-tune with refusals trimmed, made to run his **Odysseus** workspace. He announced it on 2 October 2026 and then paused the release to finish it, so **its weights aren't public yet**. Every time you run the installer it looks again, and when Ajax is out (and fits your PC) it's installed next to your other models. Pick it in the chat's model list.
+
+It only trusts **official sources**: PewDiePie's Ajax page ([data.pewdiepie.com](https://data.pewdiepie.com)), the [Odysseus project](https://github.com/odysseus-dev/odysseus), and [`featured.json`](featured.json) in this repo. If the official files are full-size weights only, it uses a GGUF build from a well-known re-packager (bartowski, unsloth, LM Studio, ggml-org, mradermacher), never a random upload.
+
+> **Fake "PewDiePie Ajax" downloads already exist** (GitHub repos offering a "Windows zip" of Ajax, plus an "Ajax" crypto token). They appeared before Ajax was even released, so they aren't it: **don't run them.** A real model is a data file you run through Ollama, never an `.exe`.
+
+When Ajax comes out, adding its official repo to `featured.json` makes every install pick it up straight away, even if the official page changes in a way the installer doesn't recognise.
+
+## AI that does things on your PC: what's safe
+
+You can have an AI that acts on your PC. Some caution is still needed, because no AI agent is safe to give unrestricted access to your PC with no permission checks at all. Two things can go wrong:
+
+- **Mistakes**: a local model misreads what you asked and deletes or overwrites the wrong files.
+- **Hijacking ("prompt injection")**: a web page, email or GitHub issue the AI reads contains hidden instructions, and the AI follows them. Uncensored models are *more* likely to obey, because they don't refuse.
+
+So the installer sets things up like this:
+
+| | Without asking you | Asks you first / can't |
+|---|---|---|
+| **Chat (Open WebUI)** | chats; it has no tools that touch your PC unless you add some | n/a |
+| **VS Code (Continue, Agent mode)** | only the tools you switch to "Automatic" in its tools menu | everything else: Continue asks first by default |
+| **Odysseus agent** | runs commands and edits files (files: inside its workspace folder) | asks first once it has read web pages, emails or other outside content |
+| **GitHub** | reads your repos, issues and pull requests | can't push, merge, comment or delete (read-only), unless you use `--github-write` |
+
+Odysseus's shell is **not sandboxed** (its own docs say so), which is why it's only installed when you ask for it, and why you should **keep backups** of anything important. For an agent with no limits at all, run it on a spare PC or in a virtual machine, where mistakes can't reach your real files.
+
+GitHub uses GitHub's official connector ([github-mcp-server](https://github.com/github/github-mcp-server)) in **read-only** and **lockdown mode** (hides issue and PR text written by strangers in public repos, a common hijacking route). There's no token to create: the first time the AI uses GitHub, your browser opens GitHub's own sign-in page, and the login is kept in memory only.
+
+### Odysseus details
+
+- It's installed natively (no Docker) from the project's curated `main` branch, with its own private Python, and only listens on this PC.
+- The installer creates its login: user `admin` and a random password, shown at the end and saved in `~/.local_ai_installer/odysseus-login.txt` (readable only by you). Change it in Odysseus → Settings.
+- It finds your Ollama models by itself. Its long-term memory search uses simple keyword matching in this setup, because its vector database only comes with its Docker setup. Everything else works.
+- If you connected GitHub, it's added under Settings → MCP. If you changed the admin password, the installer can't add it for you and prints the two values to paste in instead.
+
 ## Updating
 
-Run the same download again. It finds your install and, only if a new model scores at least 10% better than yours, downloads it, updates Ollama and Open WebUI, checks it works, then offers to delete the old model (`--prune` does it automatically). The `.exe` also downloads the newest installer logic by itself when one is published.
+Run the same download again. It finds your install and, only if a new model scores at least 10% better than yours, downloads it, updates Ollama and Open WebUI, checks it works, then offers to delete the old model (`--prune` does it automatically). It also checks for PewDiePie's Ajax and, if you have them, updates Odysseus and the GitHub connector. The `.exe` also downloads the newest installer logic by itself when one is published.
 
 Your stuff is never touched:
 - **Chats and settings** live in `~/.local_ai_installer/webui-data` and survive every update. New models simply appear in the model list; older chats keep their original model name, so pick the new model from the dropdown to continue them.
+- **Odysseus's chats, settings and login** live in `~/.local_ai_installer/odysseus-data`, separate from the program, so updates keep them.
 - **VS Code / Continue** is re-pointed at the new models. If you edited `~/.continue/config.yaml` yourself, it is left alone.
 - **Your code and projects** are never stored by this tool.
 
+GitHub write access (`--github-write`) is only kept for the run that asks for it: run the installer without it and your AI goes back to read-only.
+
 ## Storage
 
-The installer shows how much space it needs and stops if you don't have enough. Expect roughly **6-50 GB** depending on your hardware tier. To keep models on another drive: `--models-dir D:\AIModels`. Models can't run from Google Drive / OneDrive (too slow, and syncing can corrupt them), so the installer refuses cloud-synced folders.
+The installer shows how much space it needs and stops if you don't have enough. Expect roughly **6-50 GB** depending on your hardware tier (Odysseus adds about 1.5 GB, Ajax about 6 GB). To keep models on another drive: `--models-dir D:\AIModels`. Models can't run from Google Drive / OneDrive (too slow, and syncing can corrupt them), so the installer refuses cloud-synced folders.
 
 ## Options
 
 ```
---dry-run        detect + research only, install nothing
---check          health-check an existing install and repair it
---launch         start everything and open the chat (what the shortcut runs)
--y / --yes       no questions
---offline        skip the live research (use the built-in list)
+--dry-run         detect + research only, install nothing
+--check           health-check an existing install and repair it
+--launch          start everything and open the chat (what the shortcut runs)
+--launch odysseus start Odysseus and open it (the "Odysseus AI" shortcut)
+-y / --yes        no questions (extras are then only added with the options below)
+--odysseus        also install Odysseus, PewDiePie's AI workspace
+--github          let your AI read your GitHub (read-only)
+--github-write    ...and also make changes (push, open issues / pull requests)
+--no-pewdiepie    don't look for PewDiePie's Ajax model
+--offline         skip the live research (use the built-in list)
 --no-webui  --no-vscode  --no-open  --no-shortcut
---models-dir DIR store models on another local drive
---max-gb N       never pick models needing more than N GB (slow PCs)
---prune          delete the old model after an upgrade
+--models-dir DIR  store models on another local drive
+--max-gb N        never pick models needing more than N GB (slow PCs)
+--prune           delete the old model after an upgrade
 ```
 
 ## How the research works
@@ -75,13 +126,13 @@ This is a heuristic, not a benchmark: nobody publishes a trustworthy "best unloc
 
 ## Troubleshooting
 
-- Everything the installer does is written to **`~/.local_ai_installer/install.log`** (on Windows: `%USERPROFILE%\.local_ai_installer\install.log`). Open WebUI's own log is `webui.log` next to it. Send those if something fails.
+- Everything the installer does is written to **`~/.local_ai_installer/install.log`** (on Windows: `%USERPROFILE%\.local_ai_installer\install.log`). Open WebUI's own log is `webui.log` next to it, Odysseus's is `odysseus.log`. Send those if something fails (`odysseus-login.txt` holds your password: don't send that one).
 - `--check` re-tests everything and restarts whatever stopped.
-- The chat is only reachable from your own PC (it listens on `127.0.0.1`).
+- The chat and Odysseus are only reachable from your own PC (they listen on `127.0.0.1`).
 
 ## Safety and licence
 
-"Unlocked" community models have no content filtering and vary in quality; you are responsible for how you use them. Models are downloaded from third parties under their own licences. Review the code before running it: it downloads and runs the official installers for Ollama and uv. MIT licensed, provided as-is.
+"Unlocked" community models have no content filtering and vary in quality; you are responsible for how you use them. Models are downloaded from third parties under their own licences. Review the code before running it: it downloads and runs the official installers for Ollama and uv, GitHub's github-mcp-server (MIT) when you connect GitHub, and Odysseus (AGPL-3.0) when you ask for it. MIT licensed, provided as-is.
 
 ## For developers
 

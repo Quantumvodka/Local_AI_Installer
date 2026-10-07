@@ -190,6 +190,7 @@ class Helpers(unittest.TestCase):
     def test_unlocked_label(self):
         self.assertTrue(lai.is_unlocked("huihui_ai/qwen3-abliterated:8b"))
         self.assertTrue(lai.is_unlocked("dolphin3:8b"))
+        self.assertTrue(lai.is_unlocked("huihui_ai/qwen2.5-coder-abliterate:7b"))
         self.assertFalse(lai.is_unlocked("qwen2.5-coder:7b"))
 
     def test_continue_config_written_and_user_edits_respected(self):
