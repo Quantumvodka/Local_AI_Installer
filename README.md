@@ -41,6 +41,13 @@ python local_ai_installer.py -y --no-webui
 
 Requires Python 3.8+ only (no pip packages). Windows needs `winget`, macOS needs Homebrew, Linux uses the official Ollama installer (may ask for sudo).
 
+## Updating (just run it again)
+Run the same launcher any time. If it finds a previous install (`~/.local_ai_installer/state.json`) it switches to **update mode**: it re-researches, and only if a new model scores at least 10% better than the one you have does it download it, update Ollama and Open WebUI, and verify before offering to delete the old model (`--prune` deletes it automatically). Nothing of yours is touched:
+- **Chats and settings** live in Open WebUI's Docker volume (`open-webui`) and are kept; new models just appear in its model list. Old chats keep their original model name, so switch the model in the dropdown to continue them with the new one.
+- **VS Code / Continue** config is re-pointed at the new models. If you have edited `~/.continue/config.yaml` yourself, it is left alone.
+- **Your code and projects** are never stored by this tool.
+- Models themselves are not "data": old and new coexist until you delete the old one.
+
 ## Storage
 The installer shows the estimated download size and your free space before installing, and stops if there isn't enough. Expect roughly **5-45 GB** depending on your hardware tier (+ ~4 GB for the optional Open WebUI). To keep models on another drive: `python local_ai_installer.py --models-dir D:\\AIModels`. Models can't run from Google Drive/OneDrive (too slow, and sync can corrupt files); the installer refuses cloud-synced folders. If Ollama is already running as a service, restart it after changing the models folder.
 
