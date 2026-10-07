@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, python: "3.8" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Syntax check
+        run: python -m py_compile local_ai_installer.py
+
+      - name: Unit tests (plus live Hugging Face / Ollama registry checks)
+        env:
+          LAI_ONLINE: "1"
+        run: python -m unittest discover -s tests -v
+
+      - name: Dry run on real hardware (detection + live research)
+        run: python local_ai_installer.py --dry-run --debug
+
+      - name: Launcher scripts parse (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+
+      - name: Launcher scripts parse (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          sh -n install.sh
+          sh -n launchers/Install-Mac.command
+          sh -n launchers/Install-Linux.sh

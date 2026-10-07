@@ -1,0 +1,49 @@
+name: End-to-end install test
+
+# Really installs everything (Ollama, small models, Open WebUI) on a clean Windows / macOS / Linux machine,
+# then runs the health check. Manual: Actions tab -> "End-to-end install test" -> Run workflow.
+# On a pull request it only runs when the PR title contains "[e2e]".
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  e2e:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[e2e]')
+    name: e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install everything (small models only, to keep the test fast)
+        run: python local_ai_installer.py --yes --no-vscode --no-open --no-shortcut --max-gb 2 --debug
+
+      - name: Health check
+        run: python local_ai_installer.py --check
+
+      - name: Open WebUI answers over HTTP
+        shell: python
+        run: |
+          import json, os, urllib.request
+          state = json.load(open(os.path.join(os.path.expanduser("~"), ".local_ai_installer", "state.json")))
+          port = state["webui_port"]
+          body = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=20).read()
+          print("webui /health ->", body)
+          page = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=20).read(2000)
+          assert b"<html" in page.lower(), page
+
+      - name: Logs
+        if: always()
+        shell: bash
+        run: |
+          for f in install.log ollama.log webui.log; do
+            echo "=================== $f"; tail -n 80 "$HOME/.local_ai_installer/$f" 2>/dev/null || true
+          done
