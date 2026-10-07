@@ -356,6 +356,16 @@ class Processes(unittest.TestCase):
             proc.wait()
 
 
+class OdysseusProcess(unittest.TestCase):
+    def test_recognised_even_when_macos_hides_the_python_path(self):
+        # macOS framework Python re-launches itself as .../Python.app/Contents/MacOS/Python, so `ps` shows no
+        # virtual-env path; the command line itself must still say it is Odysseus or stop_odysseus refuses.
+        shown = ("/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python "
+                 + " ".join(lai.odysseus_cmd(7860)[1:]))
+        self.assertTrue(all(w in shown.lower() for w in lai.ODYSSEUS_PROCESS_WORDS), shown)
+        self.assertIn("--port 7860", shown)
+
+
 class CommandLine(unittest.TestCase):
     def test_launch_targets(self):
         p = lai.build_parser()

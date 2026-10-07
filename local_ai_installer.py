@@ -1628,14 +1628,23 @@ def odysseus_first_setup():
     return True
 
 
+ODYSSEUS_PROCESS_WORDS = ("uvicorn", "odysseus")  # how stop_odysseus recognises the process it started
+
+
+def odysseus_cmd(port):
+    # --app-dir puts the Odysseus folder on the command line itself: macOS's framework Python re-launches itself
+    # as ".../Python.app/Contents/MacOS/Python", so `ps` would otherwise show no sign that this is Odysseus.
+    return [odysseus_python(), "-m", "uvicorn", "app:app", "--app-dir", ODYSSEUS_DIR, "--host", "127.0.0.1",
+            "--port", str(port)]
+
+
 def start_odysseus(state, port, wait=600):
     """Start Odysseus in the background (this PC only). wait=0: don't wait for it to answer."""
     if not odysseus_installed():
         return False
     os.makedirs(ODYSSEUS_DATA, exist_ok=True)
     with open(ODYSSEUS_LOG, "ab") as lf:
-        proc = subprocess.Popen([odysseus_python(), "-m", "uvicorn", "app:app", "--host", "127.0.0.1",
-                                 "--port", str(port)], cwd=ODYSSEUS_DIR, env=odysseus_env(), stdout=lf, stderr=lf,
+        proc = subprocess.Popen(odysseus_cmd(port), cwd=ODYSSEUS_DIR, env=odysseus_env(), stdout=lf, stderr=lf,
                                 stdin=subprocess.DEVNULL, **detached_kwargs())
     state.setdefault("odysseus", {}).update(pid=proc.pid, port=port)
     save_state(state)
@@ -1644,7 +1653,7 @@ def start_odysseus(state, port, wait=600):
 
 def stop_odysseus(state, port):
     pid = (state.get("odysseus") or {}).get("pid")
-    return bool(pid) and stop_process(pid, ("uvicorn", "odysseus"), lambda: odysseus_health(port))
+    return bool(pid) and stop_process(pid, ODYSSEUS_PROCESS_WORDS, lambda: odysseus_health(port))
 
 
 def odysseus_add_github(port, cmd):
@@ -1694,7 +1703,8 @@ def setup_odysseus(state, github=None):
     if fresh or (sha and sha != info.get("sha")):
         if odysseus_health(info.get("port", ODYSSEUS_PORT)):
             say("Pausing Odysseus while it updates...")
-            stop_odysseus(state, info.get("port", ODYSSEUS_PORT))
+            if not stop_odysseus(state, info.get("port", ODYSSEUS_PORT)):
+                say("  (could not pause it automatically; restart your PC after this so the update takes effect)")
         say("Downloading Odysseus, PewDiePie's AI workspace..." if fresh else "Updating Odysseus...")
         if fetch_odysseus(sha):
             info["sha"] = sha
