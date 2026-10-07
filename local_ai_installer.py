@@ -21,7 +21,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -151,10 +153,19 @@ def vtuple(v):
     return tuple(nums + [0] * (3 - len(nums)))
 
 
-def run(cmd, timeout=60):
+def ps_env(extra=None):
+    """Environment for launching Windows PowerShell. A PSModulePath inherited from PowerShell 7 stops 5.1 loading
+    its built-in modules, so drop it and let Windows PowerShell compute its own."""
+    env = dict(os.environ)
+    env.pop("PSModulePath", None)
+    env.update(extra or {})
+    return env
+
+
+def run(cmd, timeout=60, env=None):
     """Run a command quietly; return its stdout if it succeeded, else ''."""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout, env=env)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -740,8 +751,8 @@ def upgrade_ollama():
 def start_ollama(wait=90):
     if ollama_up():
         return True
-    if IS_WIN:  # the Ollama app usually starts its own server right after install/login
-        for _ in range(8):
+    if IS_WIN or (OS == "Linux" and os.path.isdir("/run/systemd/system")):
+        for _ in range(10):  # the installed tray app / system service starts its own server; give it a moment
             time.sleep(1)
             if ollama_up():
                 return True
@@ -902,21 +913,68 @@ def uv_bin():
     return None
 
 
+def uv_asset():
+    """Name of the prebuilt uv archive for this OS / CPU, or None."""
+    machine = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
+        platform.machine().lower(), platform.machine().lower())
+    return {
+        ("Windows", "x86_64"): "uv-x86_64-pc-windows-msvc.zip",
+        ("Windows", "aarch64"): "uv-aarch64-pc-windows-msvc.zip",
+        ("Darwin", "x86_64"): "uv-x86_64-apple-darwin.tar.gz",
+        ("Darwin", "aarch64"): "uv-aarch64-apple-darwin.tar.gz",
+        ("Linux", "x86_64"): "uv-x86_64-unknown-linux-gnu.tar.gz",
+        ("Linux", "aarch64"): "uv-aarch64-unknown-linux-gnu.tar.gz",
+    }.get((OS, machine))
+
+
 def install_uv():
+    """Download uv straight from its GitHub release (no PowerShell / shell script), verify it, unpack it."""
     if uv_bin():
         return True
+    asset = uv_asset()
+    if not asset:
+        say(f"  There is no prebuilt uv for {OS} / {platform.machine()}.")
+        return False
     say("Installing uv (a small tool that fetches Python for Open WebUI; nothing system-wide changes)...")
-    env = dict(os.environ, UV_UNMANAGED_INSTALL=os.path.join(STATE_DIR, "uv"))
+    url = f"https://github.com/astral-sh/uv/releases/latest/download/{asset}"
+    work = tempfile.mkdtemp(prefix="lai-uv-")
     try:
-        if IS_WIN:
-            subprocess.call(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-                             "irm https://astral.sh/uv/install.ps1 | iex"], env=env)
+        arc = os.path.join(work, asset)
+        download(url, arc, "uv")
+        want = None
+        try:
+            want = fetch_text(url + ".sha256", timeout=20).split()[0].lower()
+        except Exception:
+            _log("uv checksum file unavailable; continuing without verifying it")
+        if want:
+            with open(arc, "rb") as f:
+                got = hashlib.sha256(f.read()).hexdigest()
+            if got != want:
+                say("  The uv download failed its checksum, so it was not used. Run this again.")
+                return False
+        if asset.endswith(".zip"):
+            with zipfile.ZipFile(arc) as z:
+                z.extractall(work)
         else:
-            script = os.path.join(tempfile.gettempdir(), "uv-install.sh")
-            download("https://astral.sh/uv/install.sh", script, "uv")
-            subprocess.call(["sh", script], env=env)
+            with tarfile.open(arc) as t:
+                try:
+                    t.extractall(work, filter="data")
+                except TypeError:  # older Python without extraction filters
+                    t.extractall(work)
+        dest = os.path.join(STATE_DIR, "uv")
+        os.makedirs(dest, exist_ok=True)
+        for folder, _, names in os.walk(work):
+            for name in names:
+                if name in ("uv", "uv.exe", "uvx", "uvx.exe"):
+                    target = os.path.join(dest, name)
+                    shutil.copy2(os.path.join(folder, name), target)
+                    if not IS_WIN:
+                        os.chmod(target, 0o755)
     except Exception as e:
         say(f"  uv install problem: {e}")
+        return False
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     return uv_bin() is not None
 
 
@@ -1045,8 +1103,7 @@ def stop_webui(state, port):
     try:
         pid = int(pid)
         if IS_WIN:
-            cmd = run(["powershell", "-NoProfile", "-Command",
-                       f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"], timeout=20)
+            cmd = run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], timeout=20)
         else:
             cmd = run(["ps", "-p", str(pid), "-o", "command="])
         if "open-webui" not in cmd.lower():
@@ -1155,18 +1212,28 @@ def launcher_cmd(copy):
 
 
 def special_folder(name):
-    out = run(["powershell", "-NoProfile", "-Command", f"[Environment]::GetFolderPath('{name}')"], timeout=20)
-    return out or None
+    """Desktop / Start-menu folder of the current user (follows OneDrive redirection) via the Windows API."""
+    import ctypes
+    csidl = {"Desktop": 0x10, "Programs": 0x02}[name]
+    buf = ctypes.create_unicode_buffer(520)
+    try:
+        ctypes.windll.shell32.SHGetFolderPathW(0, csidl, 0, 0, buf)
+    except (OSError, AttributeError):
+        return None
+    return buf.value or None
 
 
 def make_windows_shortcut(path, cmd):
     ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:LAI_LNK);"
           "$s.TargetPath=$env:LAI_TARGET;$s.Arguments=$env:LAI_ARGS;$s.WorkingDirectory=$env:LAI_WD;"
           "$s.Description='Start Local AI and open the chat';$s.Save()")
-    env = dict(os.environ, LAI_LNK=path, LAI_TARGET=cmd[0], LAI_ARGS=subprocess.list2cmdline(cmd[1:]),
-               LAI_WD=STATE_DIR)
-    return subprocess.call(["powershell", "-NoProfile", "-Command", ps], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0 and os.path.exists(path)
+    env = ps_env(dict(LAI_LNK=path, LAI_TARGET=cmd[0], LAI_ARGS=subprocess.list2cmdline(cmd[1:]), LAI_WD=STATE_DIR))
+    try:
+        subprocess.call(["powershell", "-NoProfile", "-Command", ps], env=env,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return os.path.exists(path)
 
 
 def make_shortcuts(cmd):
@@ -1178,6 +1245,11 @@ def make_shortcuts(cmd):
                 if folder and os.path.isdir(folder):
                     p = os.path.join(folder, "Local AI Chat.lnk")
                     if make_windows_shortcut(p, cmd):
+                        made.append(p)
+                    else:  # no PowerShell / COM: a plain batch file does the same job
+                        p = os.path.join(folder, "Local AI Chat.bat")
+                        with open(p, "w", newline="") as f:
+                            f.write("@echo off\r\n" + subprocess.list2cmdline(cmd) + "\r\n")
                         made.append(p)
         elif IS_MAC:
             desk = os.path.join(HOME, "Desktop")

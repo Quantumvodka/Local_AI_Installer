@@ -1,11 +1,17 @@
 """Offline tests for the installer's logic. Run: python -m unittest discover -s tests -v"""
 import builtins
+import hashlib
 import importlib.util
+import io
 import json
 import os
+import platform
+import shutil
 import sys
+import tarfile
 import tempfile
 import unittest
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _spec = importlib.util.spec_from_file_location("lai", os.path.join(ROOT, "local_ai_installer.py"))
@@ -231,6 +237,68 @@ class Pulling(unittest.TestCase):
     def test_returns_none_when_nothing_works(self):
         got, _ = self.run_pull(["gone", "broken"], set())
         self.assertIsNone(got)
+
+
+class UvInstall(unittest.TestCase):
+    def archive(self, folder, kind, name):
+        path = os.path.join(folder, name)
+        files = {"uv": b"fake uv", "uvx": b"fake uvx", "README.md": b"docs"}
+        if kind == "zip":
+            with zipfile.ZipFile(path, "w") as z:
+                for n, data in files.items():
+                    z.writestr(n.replace("uv", "uv.exe") if n.startswith("uv") else n, data)
+        else:
+            with tarfile.open(path, "w:gz") as t:
+                for n, data in files.items():
+                    info = tarfile.TarInfo(f"uv-x86_64-unknown-linux-gnu/{n}")
+                    info.size = len(data)
+                    t.addfile(info, io.BytesIO(data))
+        return path
+
+    def run_install(self, os_name, machine, kind, good_checksum=True):
+        with tempfile.TemporaryDirectory() as d:
+            saved = (lai.OS, lai.IS_WIN, lai.STATE_DIR, lai.HOME, lai.download, lai.fetch_text,
+                     lai.shutil.which, platform.machine)
+            asset = {"zip": "uv-x86_64-pc-windows-msvc.zip", "tar": "uv-x86_64-unknown-linux-gnu.tar.gz"}[kind]
+            arc = self.archive(d, kind, "source-" + asset)
+            with open(arc, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest() if good_checksum else "0" * 64
+            lai.OS, lai.IS_WIN = os_name, os_name == "Windows"
+            lai.STATE_DIR, lai.HOME = os.path.join(d, "state"), os.path.join(d, "home")
+            lai.download = lambda url, dest, label=None: shutil.copy(arc, dest)
+            lai.fetch_text = lambda url, timeout=15: f"{digest}  {asset}\n"
+            lai.shutil.which = lambda *a, **k: None
+            platform.machine = lambda: machine
+            try:
+                ok = lai.install_uv()
+                exe = "uv.exe" if lai.IS_WIN else "uv"
+                return ok, os.path.exists(os.path.join(lai.STATE_DIR, "uv", exe))
+            finally:
+                (lai.OS, lai.IS_WIN, lai.STATE_DIR, lai.HOME, lai.download, lai.fetch_text,
+                 lai.shutil.which, platform.machine) = saved
+
+    def test_asset_names(self):
+        saved = lai.OS, platform.machine
+        try:
+            for os_name, machine, want in (("Windows", "AMD64", "uv-x86_64-pc-windows-msvc.zip"),
+                                           ("Windows", "ARM64", "uv-aarch64-pc-windows-msvc.zip"),
+                                           ("Darwin", "arm64", "uv-aarch64-apple-darwin.tar.gz"),
+                                           ("Darwin", "x86_64", "uv-x86_64-apple-darwin.tar.gz"),
+                                           ("Linux", "x86_64", "uv-x86_64-unknown-linux-gnu.tar.gz"),
+                                           ("Linux", "aarch64", "uv-aarch64-unknown-linux-gnu.tar.gz"),
+                                           ("Linux", "riscv64", None)):
+                lai.OS = os_name
+                platform.machine = lambda m=machine: m
+                self.assertEqual(lai.uv_asset(), want, (os_name, machine))
+        finally:
+            lai.OS, platform.machine = saved
+
+    def test_unpacks_zip_and_tarball(self):
+        self.assertEqual(self.run_install("Windows", "AMD64", "zip"), (True, True))
+        self.assertEqual(self.run_install("Linux", "x86_64", "tar"), (True, True))
+
+    def test_bad_checksum_is_rejected(self):
+        self.assertEqual(self.run_install("Linux", "x86_64", "tar", good_checksum=False), (False, False))
 
 
 class Hardware(unittest.TestCase):
