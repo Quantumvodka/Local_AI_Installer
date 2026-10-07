@@ -47,7 +47,7 @@ OS = platform.system()  # Linux / Darwin / Windows
 IS_WIN = OS == "Windows"
 IS_MAC = OS == "Darwin"
 HOME = os.path.expanduser("~")
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 REPO = "Quantumvodka/Local_AI_Installer"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/main/local_ai_installer.py"
 OLLAMA_API = "http://127.0.0.1:11434"
@@ -2086,6 +2086,8 @@ def main(argv=None):
     had_ody = bool(state.get("odysseus")) and odysseus_installed()
     want_ody = had_ody or a.odysseus
     want_gh = bool(state.get("github")) or a.github or a.github_write
+    gh_state = state.get("github") or {}
+    gh_write = a.github_write or (bool(gh_state.get("write")) and not a.github)  # --github alone = back to read-only
     if not (a.dry_run or a.yes):
         if not want_ody:
             say("\nOptional: Odysseus, PewDiePie's open-source AI workspace (chat, agents, deep research, notes).")
@@ -2096,8 +2098,14 @@ def main(argv=None):
             say("\nOptional: let your AI read your GitHub (repos, issues, pull requests) - read-only. You sign in")
             say("  with GitHub in your browser the first time it's used; no password or token is saved.")
             want_gh = confirm("  Connect GitHub?", False)
+        if want_gh and not gh_write and not gh_state.get("write_asked"):
+            say("\nOptional: also let your AI make changes on GitHub - push code, create branches, open issues and")
+            say("  pull requests, comment. It acts as you, so review what it does; you can turn this off by running")
+            say("  the installer again with --github (read-only).")
+            gh_write = confirm("  Allow your AI to make changes on GitHub?", False, default=False)
+            gh_state["write_asked"] = True
     say(f"Extras:       Odysseus (PewDiePie's AI workspace): {'yes' if want_ody else 'no (add --odysseus)'}; "
-        f"GitHub for your AI: {('yes, can make changes' if a.github_write else 'yes, read-only') if want_gh else 'no (add --github)'}")
+        f"GitHub for your AI: {('yes, can make changes' if gh_write else 'yes, read-only') if want_gh else 'no (add --github)'}")
 
     mdir = models_dir(a.models_dir)
     need = 0.0
@@ -2173,8 +2181,8 @@ def main(argv=None):
             _log(traceback.format_exc())
             gh_version = None
         if gh_version:
-            gh_cmd = github_cmd(a.github_write)
-            state["github"] = {"version": gh_version, "write": a.github_write}
+            gh_cmd = github_cmd(gh_write)
+            state["github"] = {"version": gh_version, "write": gh_write, "write_asked": True}
         else:
             say("  GitHub could not be connected this time - run this again to retry.")
 
@@ -2262,7 +2270,7 @@ def main(argv=None):
     if gh_cmd:
         apps = " and ".join(n for n, ok in (("VS Code (Continue -> Agent mode)", code_ok), ("Odysseus", ody_url)) if ok)
         if apps:
-            say(f"  GitHub               : {'can read and change' if a.github_write else 'read-only access to'} your "
+            say(f"  GitHub               : {'can read and change' if gh_write else 'read-only access to'} your "
                 f"GitHub from {apps}")
             say("      the first time the AI uses it, your browser opens GitHub's sign-in page")
         else:
