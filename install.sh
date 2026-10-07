@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 # One-line installer for Linux/macOS:
-#   curl -fsSL https://raw.githubusercontent.com/quantumvodka/local_ai_installer/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main/install.sh | sh
 # Extra flags go after "-s --":  ... | sh -s -- --dry-run
 set -e
-REPO_RAW="https://raw.githubusercontent.com/quantumvodka/local_ai_installer/main"
+REPO_RAW="https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main"
 PY=$(command -v python3 || command -v python || true)
 if [ -z "$PY" ]; then
   echo "Python 3 is required. Install it (macOS: 'brew install python', Ubuntu: 'sudo apt install python3') and re-run." >&2

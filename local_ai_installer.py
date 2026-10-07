@@ -10,6 +10,7 @@ Stdlib only. Works on Windows, macOS and Linux.
 """
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 OS = platform.system()  # Linux / Darwin / Windows
@@ -155,25 +157,121 @@ def detect():
 
 
 # ---------------------------------------------------------------- 2. research
-def hf_trending(limit=5):
-    """Best-effort live look at trending GGUF coding/abliterated models on Hugging Face."""
-    out = {}
-    for label, q in (("coding", "coder gguf"), ("unlocked", "abliterated gguf")):
-        url = f"https://huggingface.co/api/models?search={q.replace(' ', '+')}&sort=trendingScore&limit={limit}"
+# Live research: query Hugging Face for GGUF models, read the real file sizes,
+# keep only quants that fit THIS machine, then rank by capability/recency/popularity.
+HF = "https://huggingface.co/api/models"
+UNLOCK_TERMS = ["abliterated", "uncensored", "dolphin", "heretic"]
+BAD_NAME = re.compile(r"lora|draft|embed|rerank|mmproj|guard|tts|whisper|-base\b|awq|gptq|mlx", re.I)
+# quant label -> quality factor (relative to full precision)
+QUANTS = {"Q8_0": 1.0, "Q6_K": 0.99, "Q5_K_M": 0.97, "Q5_K_S": 0.96, "Q4_K_M": 0.93,
+          "Q4_K_S": 0.91, "IQ4_XS": 0.90, "Q4_0": 0.88, "Q3_K_L": 0.82, "Q3_K_M": 0.80}
+QUANT_RE = re.compile(r"[-.](" + "|".join(sorted(QUANTS, key=len, reverse=True)) + r")\.gguf$", re.I)
+MAX_AGE_MONTHS = 20
+
+
+def hf_get(url, timeout=15):
+    req = urllib.request.Request(url, headers={"User-Agent": "local-ai-installer"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def months_old(iso):
+    try:
+        t = time.mktime(time.strptime(iso[:10], "%Y-%m-%d"))
+        return max(0.0, (time.time() - t) / (30.4 * 86400))
+    except (ValueError, TypeError):
+        return 99.0
+
+
+def best_quant(files, budget_gb):
+    """files: [(filename, size_gb)]. Return (quant, size_gb) of the best-quality quant within budget."""
+    fits = []
+    for name, size in files:
+        m = QUANT_RE.search(name)
+        if m and "-of-" not in name and size <= budget_gb:  # skip split GGUFs
+            q = m.group(1).upper()
+            fits.append((QUANTS[q], q, size))
+    if not fits:
+        return None
+    # prefer the largest file that fits (= highest quality), tie-break on quality factor
+    fits.sort(key=lambda x: (x[2], x[0]))
+    _, q, size = fits[-1]
+    return q, size
+
+
+def score(size_gb, quant, downloads, likes, age_months):
+    capability = size_gb * QUANTS[quant]                  # bigger model that fits ~ smarter
+    recency = 0.5 ** (age_months / 9.0)                   # halves every 9 months
+    popularity = 0.5 + 0.5 * min(1.0, math.log10(downloads + likes * 20 + 1) / 5.5)
+    return capability * recency * popularity
+
+
+def search_models(terms, extra, limit=40):
+    seen = {}
+    for t in terms:
+        q = urllib.parse.quote(f"{t} {extra}".strip())
         try:
-            with urllib.request.urlopen(url, timeout=10) as r:
-                out[label] = [m["id"] for m in json.load(r)]
+            for m in hf_get(f"{HF}?search={q}&filter=gguf&sort=downloads&direction=-1&limit={limit}"):
+                seen[m["id"]] = m
         except Exception:
-            out[label] = []
-    return out
+            continue
+    return list(seen.values())
+
+
+def rank_candidates(models, budget_gb, want, detail=hf_get):
+    """want: 'coder' or 'chat'. Returns scored candidates, best first."""
+    out = []
+    for m in models:
+        rid = m["id"]
+        low = rid.lower()
+        if BAD_NAME.search(rid) or not any(t in low for t in UNLOCK_TERMS):
+            continue
+        is_coder = "cod" in low
+        if (want == "coder") != is_coder:
+            continue
+        age = months_old(m.get("createdAt") or m.get("lastModified"))
+        if age > MAX_AGE_MONTHS:
+            continue
+        try:
+            info = detail(f"{HF}/{rid}?blobs=true")
+        except Exception:
+            continue
+        files = [(f["rfilename"], (f.get("size") or 0) / 1024**3) for f in info.get("siblings", [])
+                 if f["rfilename"].lower().endswith(".gguf")]
+        bq = best_quant(files, budget_gb)
+        if not bq:
+            continue
+        quant, size = bq
+        out.append({"repo": rid, "quant": quant, "size_gb": round(size, 1), "age_months": round(age, 1),
+                    "downloads": m.get("downloads", 0), "likes": m.get("likes", 0),
+                    "score": score(size, quant, m.get("downloads", 0), m.get("likes", 0), age),
+                    "tag": f"hf.co/{rid}:{quant}"})
+    out.sort(key=lambda c: -c["score"])
+    return out[:5]
+
+
+def research(spec):
+    """Live HF research. Returns {'coder': [...], 'chat': [...]} candidate lists (may be empty)."""
+    budget = spec["usable_gb"] * 0.85  # headroom for context / KV cache
+    res = {}
+    res["chat"] = rank_candidates(search_models(UNLOCK_TERMS, ""), budget, "chat")
+    res["coder"] = rank_candidates(search_models(UNLOCK_TERMS, "coder"), budget, "coder")
+    return res
 
 
 def recommend(spec):
+    """Offline fallback: curated tiers."""
     tier = TIERS[0]
     for t in TIERS:
         if spec["usable_gb"] >= t[0]:
             tier = t
     return {"tier": tier[1], "coder": tier[2], "chat": tier[3]}
+
+
+def show(cands, label):
+    for i, c in enumerate(cands, 1):
+        say(f"  {i}. {c['repo']} [{c['quant']}, {c['size_gb']} GB, {c['age_months']} mo old, "
+            f"{c['downloads']:,} downloads]")
 
 
 # ---------------------------------------------------------------- 3. install
@@ -320,18 +418,29 @@ def main():
 
     step(2, "Researching best unlocked local AI stack")
     rec = recommend(spec)
-    say(f"Tier:       {rec['tier']}")
-    say(f"Runtime:    Ollama (llama.cpp engine; CUDA / ROCm / Metal / CPU auto-selected)")
-    say(f"Coding:     {rec['coder'][0]}  (fallbacks: {', '.join(rec['coder'][1:]) or '-'})")
-    say(f"Chat/LLM:   {rec['chat'][0]}  (abliterated = refusals removed)")
+    live = {"coder": [], "chat": []}
+    if not a.offline:
+        say("Searching Hugging Face for the newest unlocked models that fit your memory...")
+        live = research(spec)
+    if live["coder"] and live["chat"]:
+        say("Top coding models (unlocked):")
+        show(live["coder"], "coder")
+        say("Top chat/LLM models (unlocked):")
+        show(live["chat"], "chat")
+        coder_opts = [c["tag"] for c in live["coder"][:3]] + rec["coder"]
+        chat_opts = [c["tag"] for c in live["chat"][:3]] + rec["chat"]
+        say(f"Chosen coding: {coder_opts[0]}")
+        say(f"Chosen chat:   {chat_opts[0]}")
+    else:
+        if not a.offline:
+            say("Live research unavailable (offline/blocked?) - using built-in curated list.")
+        coder_opts, chat_opts = rec["coder"], rec["chat"]
+        say(f"Tier:       {rec['tier']}")
+        say(f"Coding:     {coder_opts[0]}")
+        say(f"Chat/LLM:   {chat_opts[0]}")
+    say("Runtime:    Ollama (llama.cpp engine; CUDA / ROCm / Metal / CPU auto-selected)")
     say(f"Embeddings: {EMBED_MODEL}")
     say("Plug-ins:   " + "; ".join(d for _, d in VSCODE_PLUGINS) + "; Open WebUI (browser chat UI)")
-    if not a.offline:
-        t = hf_trending()
-        if t["coding"] or t["unlocked"]:
-            say("Live Hugging Face trending (for reference):")
-            say("  coding:   " + ", ".join(t["coding"]))
-            say("  unlocked: " + ", ".join(t["unlocked"]))
     if spec["usable_gb"] < 4:
         say("NOTE: low memory - expect slow responses; consider a smaller quant or a GPU.")
     if a.dry_run:
@@ -344,8 +453,8 @@ def main():
     if not install_ollama() or not start_ollama():
         say("ERROR: could not install/start Ollama. See https://ollama.com/download")
         return 1
-    coder = pull_first(rec["coder"])
-    chat = pull_first(rec["chat"])
+    coder = pull_first(coder_opts)
+    chat = pull_first(chat_opts)
     pull_first([EMBED_MODEL])
     if not (coder and chat):
         say("ERROR: model download failed (check network/disk space).")
@@ -368,4 +477,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    if getattr(sys, "frozen", False) and sys.stdin.isatty():  # double-clicked .exe: keep window open
+        input("\nPress Enter to close...")
+    sys.exit(code)

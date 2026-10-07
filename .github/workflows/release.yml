@@ -1,0 +1,44 @@
+name: Build downloadable installers
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            name: LocalAIInstaller-Windows.exe
+            out: dist/LocalAIInstaller.exe
+          - os: macos-latest
+            name: LocalAIInstaller-Mac
+            out: dist/LocalAIInstaller
+          - os: ubuntu-latest
+            name: LocalAIInstaller-Linux
+            out: dist/LocalAIInstaller
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyinstaller
+      - run: pyinstaller --onefile --console --name LocalAIInstaller local_ai_installer.py
+      - run: python -c "import shutil; shutil.copy(r'${{ matrix.out }}', r'${{ matrix.name }}')"
+      - uses: actions/upload-artifact@v4
+        with: { name: "${{ matrix.name }}", path: "${{ matrix.name }}" }
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: assets, merge-multiple: true }
+      - run: cp launchers/Install-Windows.bat launchers/Install-Mac.command launchers/Install-Linux.sh assets/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
