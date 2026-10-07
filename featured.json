@@ -1,0 +1,7 @@
+{
+  "_about": "Official download locations of PewDiePie's own model (Ajax). The installer reads this file on every run, so adding an entry here makes every install pick it up without a new release. Only add an entry after PewDiePie's Ajax page (https://data.pewdiepie.com) or the Odysseus project (https://github.com/odysseus-dev/odysseus) links to it: 'huggingface' takes repo ids like owner/name, 'ollama' takes tags like owner/name:size.",
+  "pewdiepie": {
+    "huggingface": [],
+    "ollama": []
+  }
+}

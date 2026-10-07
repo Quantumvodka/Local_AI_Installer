@@ -1,7 +1,7 @@
 name: End-to-end install test
 
-# Really installs everything (Ollama, small models, Open WebUI) on a clean Windows / macOS / Linux machine,
-# then runs the health check. Manual: Actions tab -> "End-to-end install test" -> Run workflow.
+# Really installs everything (Ollama, small models, Open WebUI, Odysseus, the GitHub connector) on a clean
+# Windows / macOS / Linux machine, then runs the health check. Manual: Actions tab -> "End-to-end install test" -> Run workflow.
 # On a pull request it only runs when the PR title contains "[e2e]".
 on:
   workflow_dispatch:
@@ -27,8 +27,8 @@ jobs:
         shell: bash
         run: mkdir -p "$HOME/Desktop" "$HOME/.local/share/applications"
 
-      - name: Install everything (small models only, to keep the test fast)
-        run: python local_ai_installer.py --yes --no-vscode --no-open --max-gb 2 --debug
+      - name: Install everything (small models only, to keep the test fast) + Odysseus + GitHub
+        run: python local_ai_installer.py --yes --no-vscode --no-open --max-gb 2 --debug --odysseus --github
 
       - name: Health check
         run: python local_ai_installer.py --check
@@ -46,6 +46,28 @@ jobs:
           print("webui /health ->", body)
           page = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=20).read(2000)
           assert b"<html" in page.lower(), page
+
+      - name: Odysseus answers, its login works, and it has read-only GitHub connected
+        shell: python
+        run: |
+          import http.cookiejar, json, os, re, urllib.request
+          state_dir = os.path.join(os.path.expanduser("~"), ".local_ai_installer")
+          state = json.load(open(os.path.join(state_dir, "state.json")))
+          port = state["odysseus"]["port"]
+          print("odysseus /api/health ->", urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=20).read())
+          login = open(os.path.join(state_dir, "odysseus-login.txt"), encoding="utf-8").read()
+          password = re.search(r"^Password: (\S+)", login, re.M).group(1)
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+          opener.open(urllib.request.Request(f"http://127.0.0.1:{port}/api/auth/login", headers={"Content-Type": "application/json"},
+                                             data=json.dumps({"username": "admin", "password": password}).encode()), timeout=30)
+          servers = json.load(opener.open(f"http://127.0.0.1:{port}/api/mcp/servers", timeout=60))
+          github = [s for s in servers if s["name"] == "GitHub"]
+          print("GitHub in Odysseus:", github)
+          assert github and github[0]["status"] == "connected" and github[0]["tool_count"] > 0, servers
+          assert "--read-only" in github[0]["args"] and "--lockdown-mode" in github[0]["args"], github
+          for f in ("install.log", "odysseus.log"):
+              assert password not in open(os.path.join(state_dir, f), encoding="utf-8", errors="replace").read(), f
+          print("OK: Odysseus runs, its login works, GitHub is connected read-only, and no log contains the password")
 
       - name: Shortcut exists and its target brings a stopped chat back
         shell: python
@@ -71,11 +93,20 @@ jobs:
           assert subprocess.call(cmd) == 0
           assert lai.webui_health(port), "the shortcut target did not bring the chat back"
           print("OK: the shortcut target restarts the chat")
+          port = state["odysseus"]["port"]
+          assert any("Odysseus AI" in p for p in state["shortcuts"]), "no Odysseus shortcut"
+          assert lai.stop_odysseus(state, port), "could not stop Odysseus"
+          assert not lai.odysseus_health(port), "Odysseus still answers after stop"
+          cmd = lai.launcher_cmd(copy) + ["odysseus", "--no-open"]
+          print("running what the Odysseus shortcut runs:", cmd)
+          assert subprocess.call(cmd) == 0
+          assert lai.odysseus_health(port), "the Odysseus shortcut target did not bring it back"
+          print("OK: the Odysseus shortcut target restarts Odysseus")
 
       - name: Logs
         if: always()
         shell: bash
         run: |
-          for f in install.log ollama.log webui.log; do
+          for f in install.log ollama.log webui.log odysseus.log; do
             echo "=================== $f"; tail -n 80 "$HOME/.local_ai_installer/$f" 2>/dev/null || true
           done

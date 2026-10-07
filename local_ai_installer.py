@@ -8,9 +8,11 @@ Stdlib only. Works on Windows, macOS and Linux.
     python local_ai_installer.py --check     # health-check (and repair) an existing install
     python local_ai_installer.py --launch    # start everything and open the chat (what the desktop shortcut runs)
     python local_ai_installer.py -y          # no questions
+    python local_ai_installer.py --odysseus --github   # also PewDiePie's Odysseus workspace + GitHub for your AI
 """
 import argparse
 import glob
+import http.cookiejar
 import json
 import math
 import os
@@ -45,13 +47,14 @@ OS = platform.system()  # Linux / Darwin / Windows
 IS_WIN = OS == "Windows"
 IS_MAC = OS == "Darwin"
 HOME = os.path.expanduser("~")
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 REPO = "Quantumvodka/Local_AI_Installer"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/main/local_ai_installer.py"
 OLLAMA_API = "http://127.0.0.1:11434"
 STATE_DIR = os.path.join(HOME, ".local_ai_installer")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 LOG_FILE = os.path.join(STATE_DIR, "install.log")
+BIN_DIR = os.path.join(STATE_DIR, "bin")            # small helper programs (the GitHub connector)
 WEBUI_DIR = os.path.join(STATE_DIR, "webui")        # private Python environment holding Open WebUI
 WEBUI_DATA = os.path.join(STATE_DIR, "webui-data")  # chats + settings: kept across updates
 WEBUI_LOG = os.path.join(STATE_DIR, "webui.log")
@@ -127,6 +130,14 @@ def say(msg=""):
         except Exception:
             pass
     _log(msg)
+
+
+def say_private(msg):
+    """Like say(), but never written to the log file (passwords)."""
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
 
 
 def step(n, title):
@@ -441,6 +452,17 @@ def best_quant(files, budget_gb):
     return quant, size
 
 
+def gguf_files(info):
+    """[(filename, size_gb)] of the GGUF files in a Hugging Face model-info response (?blobs=true)."""
+    files = []
+    for f in (info.get("siblings") if isinstance(info, dict) else None) or []:
+        fn = f.get("rfilename", "")
+        if fn.lower().endswith(".gguf"):
+            size = f.get("size") or (f.get("lfs") or {}).get("size") or 0
+            files.append((fn, size / 1024**3))
+    return files
+
+
 def popularity(downloads, likes):
     return 0.5 + 0.5 * min(1.0, math.log10(downloads + likes * 20 + 1) / 5.5)
 
@@ -497,13 +519,7 @@ def rank_candidates(models, budget_gb, want, detail=None, top_n=12, stats=None):
             info = detail(f"{HF}/{rid}?blobs=true")
         except Exception:
             continue
-        files = []
-        for f in info.get("siblings") or []:
-            fn = f.get("rfilename", "")
-            if fn.lower().endswith(".gguf"):
-                size = f.get("size") or (f.get("lfs") or {}).get("size") or 0
-                files.append((fn, size / 1024**3))
-        bq = best_quant(files, budget_gb)
+        bq = best_quant(gguf_files(info), budget_gb)
         if not bq:
             continue
         quant, size = bq
@@ -529,6 +545,170 @@ def research(spec, stats=None):
             "coder": rank_candidates(pool, budget, "coder", stats=stats)}
 
 
+# ---------------------------------------------------------------- 2b. PewDiePie's AI
+# Ajax is PewDiePie's own model: a Qwen3.5-9B fine-tune with refusals trimmed (with the Heretic tool), made to drive
+# his open-source Odysseus workspace. It was announced on 2 Oct 2026 and then its release was paused, so every run
+# looks for it again and installs it once it is out. Only OFFICIAL sources are trusted: fake "PewDiePie Ajax"
+# downloads (zips / exes on GitHub) appeared within days, a classic way to spread malware. The sources: PewDiePie's
+# Ajax page, the Odysseus project's README, and featured.json in this repo (filled in by hand once Ajax is out).
+PEWDIEPIE_PAGES = (("PewDiePie's Ajax page", "https://data.pewdiepie.com/"),
+                   ("the Odysseus project", "https://raw.githubusercontent.com/odysseus-dev/odysseus/HEAD/README.md"))
+FEATURED_URL = f"https://raw.githubusercontent.com/{REPO}/main/featured.json"
+PEWDIEPIE_MODEL = "ajax"
+# If the official repo only has full-size weights, the GGUF build (what Ollama runs) must come from one of these
+# well-known re-packagers or the same owner: anyone can upload a file that claims to be "Ajax".
+GGUF_MAKERS = ("bartowski", "unsloth", "lmstudio-community", "ggml-org", "mradermacher")
+HF_LINK = re.compile(r"(?:huggingface\.co|hf\.co)/(?!(?:datasets|spaces|docs|blog|api|models|collections|papers|"
+                     r"organizations|settings|login|join|learn|posts|tasks)/)([a-z0-9][\w.-]*/[a-z0-9][\w.-]*)", re.I)
+OLLAMA_LINK = re.compile(r"(?:ollama\.com/(?:library/)?|ollama (?:run|pull) )"
+                         r"([a-z0-9][\w.-]*(?:/[\w.-]+)?(?::[\w.-]+)?)", re.I)
+FIND_RANK = {"not_released": 0, "no_gguf": 1, "too_big": 2}
+
+
+def unique(items):
+    seen, out = set(), []
+    for x in items:
+        if x and x.lower() not in seen:
+            seen.add(x.lower())
+            out.append(x)
+    return out
+
+
+def official_refs(fetch=None):
+    """Repos / Ollama tags of PewDiePie's model named by official sources.
+    Returns {'hf': [repo ids], 'ollama': [tags], 'reached': [names of the sources that answered]}."""
+    fetch = fetch or fetch_text
+    hf, ollama, reached = [], [], []
+    for name, url in PEWDIEPIE_PAGES:
+        try:
+            text = fetch(url, timeout=15)
+        except Exception:
+            continue
+        reached.append(name)
+        hf += [r for r in (re.sub(r"\.git$", "", m).rstrip(".-") for m in HF_LINK.findall(text))
+               if PEWDIEPIE_MODEL in r.lower()]
+        ollama += [t for t in (m.rstrip(".-:") for m in OLLAMA_LINK.findall(text)) if PEWDIEPIE_MODEL in t.lower()]
+    try:
+        listed = (json.loads(fetch(FEATURED_URL, timeout=15)) or {}).get("pewdiepie") or {}
+        reached.append("this installer's list")
+        hf += [str(r) for r in listed.get("huggingface") or []]
+        ollama += [str(t) for t in listed.get("ollama") or []]
+    except Exception:
+        pass
+    return {"hf": unique(hf), "ollama": unique(ollama), "reached": reached}
+
+
+def gguf_builds(repo, detail):
+    """GGUF builds of a repo that only has full-size weights, made by trusted re-packagers (or the same owner).
+    Returns [(repo id, [(file, gb)])], most downloaded first."""
+    owner = repo.split("/")[0].lower()
+    tag = urllib.parse.quote("base_model:quantized:" + repo, safe="")
+    try:
+        found = detail(f"{HF}?filter={tag}&sort=downloads&direction=-1&limit=50")
+    except Exception:
+        return []
+    builds = []
+    for m in found if isinstance(found, list) else []:
+        rid = (m.get("id") if isinstance(m, dict) else None) or ""
+        if rid.split("/")[0].lower() not in GGUF_MAKERS + (owner,):
+            continue
+        try:
+            files = gguf_files(detail(f"{HF}/{rid}?blobs=true"))
+        except Exception:
+            continue
+        if files:
+            builds.append((rid, files))
+        if len(builds) >= 3:
+            break
+    return builds
+
+
+def ollama_size_gb(tag):
+    """Download size of a tag on the Ollama registry, or None if unknown."""
+    name, _, t = tag.partition(":")
+    if "/" not in name:
+        name = "library/" + name
+    try:
+        with http_open(f"https://registry.ollama.ai/v2/{name}/manifests/{t or 'latest'}", timeout=15,
+                       headers={"Accept": "application/vnd.docker.distribution.manifest.v2+json"}) as r:
+            layers = json.load(r).get("layers") or []
+    except Exception:
+        return None
+    return sum(x.get("size") or 0 for x in layers) / 1024**3 or None
+
+
+def pewdiepie_ai(budget_gb, fetch=None, detail=None, ollama_size=None):
+    """Look for PewDiePie's model through official sources only. Returns a dict whose 'status' is:
+    found (tag, repo, official, size_gb) / too_big (official, need_gb) / no_gguf (official) / not_released /
+    unreachable."""
+    detail = detail or http_json
+    ollama_size = ollama_size or ollama_size_gb
+    refs = official_refs(fetch)
+    if not refs["reached"]:
+        return {"status": "unreachable"}
+    checked = ", ".join(refs["reached"])
+    infos = []
+    for repo in refs["hf"]:
+        try:
+            info = detail(f"{HF}/{repo}?blobs=true")
+        except Exception:
+            continue  # linked, but not public (yet)
+        if isinstance(info, dict):
+            infos.append((repo, info))
+    infos.sort(key=lambda x: str(x[1].get("createdAt") or ""), reverse=True)  # newest release first
+    result = {"status": "not_released", "checked": checked}
+
+    def note(r):
+        nonlocal result
+        if FIND_RANK[r["status"]] >= FIND_RANK[result["status"]]:
+            result = r
+
+    for repo, info in infos:
+        files = gguf_files(info)
+        builds = [(repo, files)] if files else gguf_builds(repo, detail)
+        fits, sizes = [], []
+        for rid, fl in builds:
+            sizes += [s for n, s in fl if QUANT_RE.search(n) and "-of-" not in n and s > 0]
+            bq = best_quant(fl, budget_gb)
+            if bq:
+                fits.append((bq[1], rid, bq[0]))
+        if fits:
+            size, rid, quant = max(fits)
+            return {"status": "found", "official": repo, "repo": rid, "tag": f"hf.co/{rid}:{quant}",
+                    "size_gb": round(size, 1)}
+        note({"status": "too_big", "official": repo, "need_gb": round(min(sizes), 1)} if sizes
+             else {"status": "no_gguf", "official": repo})
+    for tag in refs["ollama"]:
+        size = ollama_size(tag)
+        if size is None or size <= budget_gb:
+            return {"status": "found", "official": tag, "repo": tag, "tag": tag,
+                    "size_gb": None if size is None else round(size, 1)}
+        note({"status": "too_big", "official": tag, "need_gb": round(size, 1)})
+    return result
+
+
+def show_pewdiepie(p, usable_gb):
+    s = p.get("status")
+    if s == "found":
+        size = f", {p['size_gb']} GB" if p.get("size_gb") else ""
+        via = "" if p["repo"] == p["official"] else f" (GGUF build by {p['repo'].split('/')[0]})"
+        say(f"  Found {p['official']}{via} -> {p['tag']}{size}. It will be installed next to your other models.")
+        return
+    if s == "too_big":
+        say(f"  {p['official']} is out, but even its smallest version ({p['need_gb']} GB) is too big for this PC "
+            f"(~{usable_gb} GB usable).")
+    elif s == "no_gguf":
+        say(f"  {p['official']} is out, but there is no version Ollama can run yet (no GGUF build). "
+            "Run this again in a day or two.")
+    elif s == "unreachable":
+        say("  Couldn't reach the official pages right now - skipped. Run this again later.")
+    else:
+        say(f"  No official release yet (checked {p.get('checked') or 'the official sources'}).\n"
+            "  Run this installer again later: it installs Ajax automatically once it's out.")
+    say('  Careful: "PewDiePie Ajax" downloads on GitHub and elsewhere (zips, .exe files) are fakes and often '
+        "malware.\n  This installer only uses official links.")
+
+
 def recommend(spec):
     """Offline fallback: curated tiers."""
     tier = TIERS[0]
@@ -539,7 +719,7 @@ def recommend(spec):
 
 
 def is_unlocked(tag):
-    return any(t in tag.lower() for t in UNLOCK_TERMS)
+    return any(t in tag.lower() for t in UNLOCK_TERMS + ["abliterate"])  # huihui_ai/...-abliterate tags too
 
 
 def show(cands):
@@ -866,7 +1046,12 @@ def continue_config_path():
     return os.path.join(HOME, ".continue", "config.yaml")
 
 
-def write_continue_config(coder, chat, auto):
+def yaml_str(s):
+    return "'" + str(s).replace("'", "''") + "'"  # single-quoted YAML: backslashes in Windows paths stay as they are
+
+
+def write_continue_config(coder, chat, auto, pewdiepie=None, github=None):
+    """github: the GitHub connector command (Continue offers its tools in Agent mode)."""
     path = continue_config_path()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -879,13 +1064,18 @@ def write_continue_config(coder, chat, auto):
             shutil.copy(path, path + ".bak")
         auto_block = (f'  - name: Local Autocomplete\n    provider: ollama\n    model: "{auto}"\n'
                       f'    roles: [autocomplete]\n') if auto else ""
+        pdp_block = (f'  - name: PewDiePie Ajax\n    provider: ollama\n    model: "{pewdiepie}"\n'
+                     f'    roles: [chat]\n') if pewdiepie else ""
+        mcp_block = ("mcpServers:\n  - name: GitHub\n    command: " + yaml_str(github[0]) + "\n    args: ["
+                     + ", ".join(yaml_str(x) for x in github[1:]) + "]\n") if github else ""
         coder_roles = "[chat, edit, apply]" if auto else "[chat, edit, apply, autocomplete]"
         cfg = (f"{MANAGED_MARK} - delete this line to stop automatic updates of this file\n"
                f"name: Local AI\nversion: 1.0.1\nschema: v1\nmodels:\n"
                f'  - name: Local Chat (unlocked)\n    provider: ollama\n    model: "{chat}"\n    roles: [chat]\n'
                f'  - name: Local Coder\n    provider: ollama\n    model: "{coder}"\n    roles: {coder_roles}\n'
-               f"{auto_block}"
-               f'  - name: Embeddings\n    provider: ollama\n    model: "{EMBED_MODEL}"\n    roles: [embed]\n')
+               f"{pdp_block}{auto_block}"
+               f'  - name: Embeddings\n    provider: ollama\n    model: "{EMBED_MODEL}"\n    roles: [embed]\n'
+               f"{mcp_block}")
         with open(path, "w", encoding="utf-8") as f:
             f.write(cfg)
     except OSError as e:
@@ -928,6 +1118,42 @@ def uv_asset():
     }.get((OS, machine))
 
 
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def extract_programs(arc, names, dest):
+    """Unpack a release archive (.zip / .tar.gz) and copy the named programs into dest. Returns the names copied."""
+    work = tempfile.mkdtemp(prefix="lai-unpack-")
+    copied = []
+    try:
+        if arc.endswith(".zip"):
+            with zipfile.ZipFile(arc) as z:
+                z.extractall(work)
+        else:
+            with tarfile.open(arc) as t:
+                try:
+                    t.extractall(work, filter="data")
+                except TypeError:  # older Python without extraction filters
+                    t.extractall(work)
+        os.makedirs(dest, exist_ok=True)
+        for folder, _, files in os.walk(work):
+            for name in files:
+                if name in names:
+                    target = os.path.join(dest, name)
+                    shutil.copy2(os.path.join(folder, name), target)
+                    if not IS_WIN:
+                        os.chmod(target, 0o755)
+                    copied.append(name)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return copied
+
+
 def install_uv():
     """Download uv straight from its GitHub release (no PowerShell / shell script), verify it, unpack it."""
     if uv_bin():
@@ -947,30 +1173,10 @@ def install_uv():
             want = fetch_text(url + ".sha256", timeout=20).split()[0].lower()
         except Exception:
             _log("uv checksum file unavailable; continuing without verifying it")
-        if want:
-            with open(arc, "rb") as f:
-                got = hashlib.sha256(f.read()).hexdigest()
-            if got != want:
-                say("  The uv download failed its checksum, so it was not used. Run this again.")
-                return False
-        if asset.endswith(".zip"):
-            with zipfile.ZipFile(arc) as z:
-                z.extractall(work)
-        else:
-            with tarfile.open(arc) as t:
-                try:
-                    t.extractall(work, filter="data")
-                except TypeError:  # older Python without extraction filters
-                    t.extractall(work)
-        dest = os.path.join(STATE_DIR, "uv")
-        os.makedirs(dest, exist_ok=True)
-        for folder, _, names in os.walk(work):
-            for name in names:
-                if name in ("uv", "uv.exe", "uvx", "uvx.exe"):
-                    target = os.path.join(dest, name)
-                    shutil.copy2(os.path.join(folder, name), target)
-                    if not IS_WIN:
-                        os.chmod(target, 0o755)
+        if want and sha256_file(arc) != want:
+            say("  The uv download failed its checksum, so it was not used. Run this again.")
+            return False
+        extract_programs(arc, ("uv", "uv.exe", "uvx", "uvx.exe"), os.path.join(STATE_DIR, "uv"))
     except Exception as e:
         say(f"  uv install problem: {e}")
         return False
@@ -1063,6 +1269,29 @@ def webui_env(chat_tag=None):
     return env
 
 
+def wait_until_up(proc, is_up, log_path, name, wait):
+    """Wait for a service we just started. True once is_up(); shows the end of its log if it dies."""
+    t0 = last = time.time()
+    while time.time() - t0 < wait:
+        if is_up():
+            return True
+        if proc.poll() is not None:
+            say(f"  {name} stopped unexpectedly. Last lines of its log:")
+            try:
+                with open(log_path, encoding="utf-8", errors="replace") as f:
+                    for line in f.read().splitlines()[-12:]:
+                        say("    " + line)
+            except OSError:
+                pass
+            return False
+        if time.time() - last > 30:
+            say(f"  ...still starting ({int(time.time() - t0)}s; the first start downloads a few files)")
+            last = time.time()
+        time.sleep(2)
+    say(f"  {name} is taking too long. Details: {log_path}")
+    return False
+
+
 def start_webui(state, port, chat_tag, wait=900):
     """Start Open WebUI in the background (localhost only) and wait until it answers."""
     _, exe = webui_paths()
@@ -1075,52 +1304,47 @@ def start_webui(state, port, chat_tag, wait=900):
                                 stdin=subprocess.DEVNULL, **detached_kwargs())
     state["webui_pid"] = proc.pid
     save_state(state)
-    t0 = last = time.time()
-    while time.time() - t0 < wait:
-        if webui_health(port):
-            return True
-        if proc.poll() is not None:
-            say("  Open WebUI stopped unexpectedly. Last lines of its log:")
-            try:
-                with open(WEBUI_LOG, encoding="utf-8", errors="replace") as f:
-                    for line in f.read().splitlines()[-12:]:
-                        say("    " + line)
-            except OSError:
-                pass
-            return False
-        if time.time() - last > 30:
-            say(f"  ...still starting ({int(time.time() - t0)}s; the first start downloads a few files)")
-            last = time.time()
-        time.sleep(2)
-    say(f"  Open WebUI is taking too long. Details: {WEBUI_LOG}")
-    return False
+    return wait_until_up(proc, lambda: webui_health(port), WEBUI_LOG, "Open WebUI", wait)
 
 
-def stop_webui(state, port):
-    """Stop the Open WebUI process we started earlier (only if its command line really is Open WebUI)."""
-    pid = state.get("webui_pid")
-    if not pid:
-        return False
+def process_cmdline(pid):
+    """Command line of a running process, or '' if it isn't running / can't be read."""
+    if IS_WIN:
+        return run(["powershell", "-NoProfile", "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
+                   timeout=60, env=ps_env())
+    return run(["ps", "-p", str(int(pid)), "-o", "command="])
+
+
+def stop_process(pid, must_contain, is_up, own_exe=False):
+    """Stop a process we started earlier, but only if its command line still shows it is ours.
+    own_exe: the program has its own .exe, so on Windows the plain process list is enough to recognise it."""
     try:
         pid = int(pid)
-        if IS_WIN:
+        if IS_WIN and own_exe:
             cmd = run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], timeout=20)
         else:
-            cmd = run(["ps", "-p", str(pid), "-o", "command="])
-        if "open-webui" not in cmd.lower():
+            cmd = process_cmdline(pid)
+        if not all(word in cmd.lower() for word in must_contain):
             return False
         if IS_WIN:
             subprocess.call(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
         else:
             os.kill(pid, signal.SIGTERM)
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return False
     for _ in range(20):
-        if not webui_health(port):
+        if not is_up():
             return True
         time.sleep(1)
     return False
+
+
+def stop_webui(state, port):
+    """Stop the Open WebUI process we started earlier (only if its command line really is Open WebUI)."""
+    pid = state.get("webui_pid")
+    return bool(pid) and stop_process(pid, ("open-webui",), lambda: webui_health(port), own_exe=True)
 
 
 def setup_webui(state, chat_tag):
@@ -1142,6 +1366,378 @@ def setup_webui(state, chat_tag):
     say("Starting Open WebUI (first start can take a couple of minutes)...")
     if not webui_health(port) and not start_webui(state, port, chat_tag):
         return None
+    return f"http://localhost:{port}"
+
+
+def free_port(pref):
+    for p in range(pref, pref + 20):
+        if port_free(p):
+            return p
+    return pref
+
+
+# ---------------------------------------------------------------- 3e. GitHub for your AI (optional)
+# GitHub's own MCP server (github.com/github/github-mcp-server) lets the AI apps (VS Code + Continue in Agent mode,
+# Odysseus) read your repos, issues and pull requests. It runs read-only unless you pass --github-write, and in
+# lockdown mode: issue / pull-request text written by strangers in public repos is hidden, because such text is a
+# known way to slip instructions to an AI. There is no token to create or store: the first time the AI uses GitHub,
+# your browser opens GitHub's own sign-in page, and the login is kept in memory only.
+GH_MCP_REPO = "github/github-mcp-server"
+
+
+def gh_mcp_asset():
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "arm64", "aarch64": "arm64",
+            "x86": "i386", "i386": "i386", "i686": "i386"}.get(platform.machine().lower())
+    if not arch or OS not in ("Windows", "Darwin", "Linux"):
+        return None
+    return f"github-mcp-server_{OS}_{arch}" + (".zip" if IS_WIN else ".tar.gz")
+
+
+def gh_mcp_path():
+    return os.path.join(BIN_DIR, "github-mcp-server" + (".exe" if IS_WIN else ""))
+
+
+def github_cmd(write=False):
+    """The command the AI apps run to reach GitHub."""
+    return [gh_mcp_path(), "stdio", "--lockdown-mode"] + ([] if write else ["--read-only"])
+
+
+def github_works():
+    return os.path.isfile(gh_mcp_path()) and bool(run([gh_mcp_path(), "--version"], timeout=30))
+
+
+def gh_mcp_release(asset):
+    """(version, download url, sha256 or None) of the newest release. Falls back to the 'latest' link without a
+    checksum when the GitHub API can't be asked (offline / rate-limited)."""
+    url = f"https://github.com/{GH_MCP_REPO}/releases/latest/download/{asset}"
+    try:
+        rel = http_json(f"https://api.github.com/repos/{GH_MCP_REPO}/releases/latest", timeout=15)
+    except Exception:
+        return None, url, None
+    if not isinstance(rel, dict):
+        return None, url, None
+    assets = {a.get("name"): a for a in rel.get("assets") or [] if isinstance(a, dict)}
+    mine = assets.get(asset) or {}
+    digest = (mine.get("digest") or "").lower().partition("sha256:")[2] or None
+    sums = next((a for name, a in assets.items() if (name or "").endswith("checksums.txt")), None)
+    if not digest and sums:
+        try:
+            for line in fetch_text(sums["browser_download_url"], timeout=20).splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == asset:
+                    digest = parts[0].lower()
+        except Exception:
+            pass
+    return rel.get("tag_name"), mine.get("browser_download_url") or url, digest
+
+
+def install_github_mcp(state):
+    """Download or update GitHub's MCP server, checked against its published checksum. Returns its version or None."""
+    asset = gh_mcp_asset()
+    if not asset:
+        say(f"  GitHub's connector has no build for {OS} / {platform.machine()}.")
+        return None
+    have = (state.get("github") or {}).get("version")
+    version, url, digest = gh_mcp_release(asset)
+    if os.path.isfile(gh_mcp_path()) and (version is None or version == have):
+        return have or version or "installed"
+    say("Installing GitHub's official connector (github-mcp-server)...")
+    work = tempfile.mkdtemp(prefix="lai-gh-")
+    try:
+        arc = os.path.join(work, asset)
+        download(url, arc, "github-mcp-server")
+        if not digest:
+            _log("github-mcp-server checksum unavailable; continuing without verifying it")
+        elif sha256_file(arc) != digest:
+            say("  The download failed its checksum, so it was not used. Run this again.")
+            return have if os.path.isfile(gh_mcp_path()) else None
+        extract_programs(arc, ("github-mcp-server", "github-mcp-server.exe"), BIN_DIR)
+    except Exception as e:
+        if os.path.isfile(gh_mcp_path()):  # e.g. Windows won't replace it while an AI app is using it
+            say(f"  (couldn't update the GitHub connector right now: {e}; the current one keeps working)")
+            return have
+        say(f"  GitHub connector install problem: {e}")
+        return None
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if not github_works():
+        say("  The GitHub connector was downloaded but does not run on this PC.")
+        return None
+    return version or "installed"
+
+
+def find_git_bash():
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432"), os.environ.get("ProgramFiles(x86)"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+        for rel in (("Git", "bin", "bash.exe"), ("Git", "usr", "bin", "bash.exe")):
+            p = os.path.join(base or "", *rel)
+            if base and os.path.isfile(p):
+                return p
+    return None
+
+
+def ensure_git():
+    """Windows: Git for Windows lets VS Code clone from GitHub and gives Odysseus's agent its shell (Git Bash)."""
+    if find_git_bash() or not have("winget"):
+        return
+    say("Installing Git for Windows (VS Code uses it for GitHub; Odysseus's agent uses its shell)...")
+    subprocess.call(["winget", "install", "-e", "--id", "Git.Git", "--silent",
+                     "--accept-source-agreements", "--accept-package-agreements"])
+
+
+# ---------------------------------------------------------------- 3f. Odysseus: PewDiePie's AI workspace (optional)
+# Odysseus (github.com/odysseus-dev/odysseus) is PewDiePie's open-source AI workspace: chat, agents, deep research,
+# documents, notes, email and calendar, using the models in Ollama - and the app his Ajax model is made for. Its agent
+# can run commands and edit files on this PC as you. It asks first once it has read web pages, emails or other outside
+# content (so a booby-trapped page can't steer it) and its file tools stay inside its workspace folder, but its shell
+# is not sandboxed. That's why it is only installed when you ask for it. It is reachable from this PC only, with a
+# login. Installed natively from its curated "main" branch (no Docker), with its own private Python.
+ODYSSEUS_REPO = "odysseus-dev/odysseus"
+ODYSSEUS_BRANCH = "main"
+ODYSSEUS_DIR = os.path.join(STATE_DIR, "odysseus")          # the program: replaced on every update
+ODYSSEUS_VENV = os.path.join(STATE_DIR, "odysseus-venv")    # its private Python
+ODYSSEUS_DATA = os.path.join(STATE_DIR, "odysseus-data")    # your chats, settings and login: kept across updates
+ODYSSEUS_LOG = os.path.join(STATE_DIR, "odysseus.log")
+ODYSSEUS_LOGIN = os.path.join(STATE_DIR, "odysseus-login.txt")
+ODYSSEUS_PORT = 7860 if IS_MAC else 7000                    # Macs keep 7000 for AirPlay
+ODYSSEUS_USER = "admin"
+
+
+def odysseus_python():
+    return os.path.join(ODYSSEUS_VENV, "Scripts" if IS_WIN else "bin", "python.exe" if IS_WIN else "python")
+
+
+def odysseus_installed():
+    return os.path.isfile(os.path.join(ODYSSEUS_DIR, "app.py")) and os.path.isfile(odysseus_python())
+
+
+def odysseus_env():
+    env = dict(os.environ)
+    db = os.path.join(ODYSSEUS_DATA, "app.db").replace("\\", "/")
+    env.update(ODYSSEUS_DATA_DIR=ODYSSEUS_DATA, DATABASE_URL="sqlite:///" + db, AUTH_ENABLED="true",
+               LOCALHOST_BYPASS="false", DO_NOT_TRACK="1", ANONYMIZED_TELEMETRY="false",
+               HF_HUB_DISABLE_TELEMETRY="1", PYTHONUTF8="1")
+    return env
+
+
+def odysseus_health(port):
+    try:
+        with http_open(f"http://127.0.0.1:{port}/api/health", timeout=3) as r:
+            return r.status == 200 and b"healthy" in r.read(300)
+    except Exception:
+        return False
+
+
+def odysseus_latest():
+    """Commit id at the tip of Odysseus's curated branch, or None if GitHub can't be asked right now."""
+    try:
+        with http_open(f"https://api.github.com/repos/{ODYSSEUS_REPO}/commits/{ODYSSEUS_BRANCH}", timeout=15,
+                       headers={"Accept": "application/vnd.github.sha"}) as r:
+            sha = r.read(100).decode("ascii", "replace").strip()
+    except Exception:
+        return None
+    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
+def rename_retry(src, dest, tries=5):
+    """os.rename, retried briefly: on Windows an antivirus scan can hold freshly unpacked files for a moment."""
+    for i in range(tries):
+        try:
+            return os.rename(src, dest)
+        except OSError:
+            if i == tries - 1:
+                raise
+            time.sleep(2)
+
+
+def fetch_odysseus(sha):
+    """Download Odysseus's source (pinned to one commit when known) and swap it in for the old copy."""
+    work = tempfile.mkdtemp(prefix="ody-", dir=STATE_DIR)  # same drive, so the swap below is a rename
+    old = ODYSSEUS_DIR + ".old"
+    try:
+        arc = os.path.join(work, "odysseus.zip")
+        download(f"https://github.com/{ODYSSEUS_REPO}/archive/{sha or 'refs/heads/' + ODYSSEUS_BRANCH}.zip", arc,
+                 "Odysseus")
+        src = os.path.join(work, "src")
+        with zipfile.ZipFile(arc) as z:
+            z.extractall(src)
+        root = next((os.path.join(src, d) for d in os.listdir(src)
+                     if os.path.isfile(os.path.join(src, d, "app.py"))), None)
+        if not root:
+            say("  The Odysseus download doesn't look right (no app.py), so it was not used.")
+            return False
+        shutil.rmtree(old, ignore_errors=True)
+        if os.path.exists(ODYSSEUS_DIR):
+            rename_retry(ODYSSEUS_DIR, old)
+        try:
+            rename_retry(root, ODYSSEUS_DIR)
+        except OSError:
+            if os.path.exists(old):
+                rename_retry(old, ODYSSEUS_DIR)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+        return True
+    except Exception as e:
+        say(f"  Odysseus download problem: {e}")
+        return False
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def odysseus_password():
+    """The admin password this installer created (None if it can't be read)."""
+    try:
+        with open(ODYSSEUS_LOGIN, encoding="utf-8") as f:
+            m = re.search(r"^Password: (\S+)", f.read(), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def save_odysseus_login(password):
+    try:
+        fd = os.open(ODYSSEUS_LOGIN, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"Odysseus (PewDiePie's AI workspace)\nUser:     {ODYSSEUS_USER}\nPassword: {password}\n"
+                    "Change the password in Odysseus -> Settings after you log in. Keep this file private.\n")
+    except OSError as e:
+        say(f"  (couldn't save the Odysseus login: {e})")
+
+
+def odysseus_first_setup():
+    """Odysseus's own first-time setup (folders, database, admin login). Safe to re-run."""
+    os.makedirs(ODYSSEUS_DATA, exist_ok=True)
+    env = odysseus_env()
+    env.update(ODYSSEUS_SKIP_RUN_HINT="1", ODYSSEUS_SKIP_ADMIN_PROMPT="1")
+    password = None
+    if not os.path.exists(os.path.join(ODYSSEUS_DATA, "auth.json")):
+        password = secrets.token_urlsafe(12)
+        env.update(ODYSSEUS_ADMIN_USER=ODYSSEUS_USER, ODYSSEUS_ADMIN_PASSWORD=password)
+    try:
+        r = subprocess.run([odysseus_python(), "setup.py"], cwd=ODYSSEUS_DIR, env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, errors="replace", timeout=900)
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f"  Odysseus setup problem: {e}")
+        return False
+    _log("odysseus setup.py:\n" + r.stdout[-3000:] + r.stderr[-3000:])
+    if r.returncode != 0:
+        say(f"  Odysseus's first-time setup failed. Details: {LOG_FILE}")
+        return False
+    if password and os.path.exists(os.path.join(ODYSSEUS_DATA, "auth.json")):
+        save_odysseus_login(password)
+    return True
+
+
+ODYSSEUS_PROCESS_WORDS = ("uvicorn", "odysseus")  # how stop_odysseus recognises the process it started
+
+
+def odysseus_cmd(port):
+    # --app-dir puts the Odysseus folder on the command line itself: macOS's framework Python re-launches itself
+    # as ".../Python.app/Contents/MacOS/Python", so `ps` would otherwise show no sign that this is Odysseus.
+    return [odysseus_python(), "-m", "uvicorn", "app:app", "--app-dir", ODYSSEUS_DIR, "--host", "127.0.0.1",
+            "--port", str(port)]
+
+
+def start_odysseus(state, port, wait=600):
+    """Start Odysseus in the background (this PC only). wait=0: don't wait for it to answer."""
+    if not odysseus_installed():
+        return False
+    os.makedirs(ODYSSEUS_DATA, exist_ok=True)
+    with open(ODYSSEUS_LOG, "ab") as lf:
+        proc = subprocess.Popen(odysseus_cmd(port), cwd=ODYSSEUS_DIR, env=odysseus_env(), stdout=lf, stderr=lf,
+                                stdin=subprocess.DEVNULL, **detached_kwargs())
+    state.setdefault("odysseus", {}).update(pid=proc.pid, port=port)
+    save_state(state)
+    return not wait or wait_until_up(proc, lambda: odysseus_health(port), ODYSSEUS_LOG, "Odysseus", wait)
+
+
+def stop_odysseus(state, port):
+    pid = (state.get("odysseus") or {}).get("pid")
+    return bool(pid) and stop_process(pid, ODYSSEUS_PROCESS_WORDS, lambda: odysseus_health(port))
+
+
+def odysseus_add_github(port, cmd):
+    """Register the GitHub connector in Odysseus (Settings -> MCP) using the login this installer created.
+    Returns 'added' / 'present', or None if it couldn't (e.g. you changed the password)."""
+    password = odysseus_password()
+    if not password:
+        return None
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+    def call(path, data=None, ctype=None, method=None):
+        h = {"User-Agent": "local-ai-installer/" + VERSION}
+        if ctype:
+            h["Content-Type"] = ctype
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers=h, method=method)
+        with opener.open(req, timeout=120) as r:
+            return json.load(r)
+
+    try:
+        call("/api/auth/login", json.dumps({"username": ODYSSEUS_USER, "password": password}).encode(),
+             "application/json")
+        for srv in call("/api/mcp/servers"):
+            if (srv.get("name") or "").lower() == "github":
+                if srv.get("command") == cmd[0] and srv.get("args") == cmd[1:]:
+                    return "present"
+                call(f"/api/mcp/servers/{srv['id']}", method="DELETE")  # outdated: replace it
+        boundary = uuid.uuid4().hex
+        fields = {"name": "GitHub", "transport": "stdio", "command": cmd[0], "args": json.dumps(cmd[1:]), "env": "{}"}
+        body = "".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'
+                       for k, v in fields.items()) + f"--{boundary}--\r\n"
+        res = call("/api/mcp/servers", body.encode("utf-8"), "multipart/form-data; boundary=" + boundary)
+        return "added" if res.get("id") else None
+    except Exception as e:
+        _log(f"could not add GitHub to Odysseus: {e}")
+        return None
+
+
+def setup_odysseus(state, github=None):
+    """Install or update Odysseus (no Docker) and make sure it's running. github: the connector command to register.
+    Returns its URL or None."""
+    if not install_uv():
+        say("Could not install uv, which Odysseus needs. Check your internet connection and run this again.")
+        return None
+    info = state.setdefault("odysseus", {})
+    sha = odysseus_latest()
+    fresh = not os.path.isfile(os.path.join(ODYSSEUS_DIR, "app.py"))
+    if fresh or (sha and sha != info.get("sha")):
+        if odysseus_health(info.get("port", ODYSSEUS_PORT)):
+            say("Pausing Odysseus while it updates...")
+            if not stop_odysseus(state, info.get("port", ODYSSEUS_PORT)):
+                say("  (could not pause it automatically; restart your PC after this so the update takes effect)")
+        say("Downloading Odysseus, PewDiePie's AI workspace..." if fresh else "Updating Odysseus...")
+        if fetch_odysseus(sha):
+            info["sha"] = sha
+        elif fresh:
+            return None
+        else:
+            say("  Keeping the current Odysseus version.")
+    else:
+        say("Odysseus is up to date." if sha else "Couldn't check for an Odysseus update right now - keeping yours.")
+    if not os.path.isfile(odysseus_python()):
+        say("Setting up a private Python 3.12 for Odysseus...")
+        if run_stream([uv_bin(), "venv", "--python", "3.12", ODYSSEUS_VENV])[0] != 0:
+            return None
+    say("Installing / updating Odysseus's Python packages (a few minutes the first time)...")
+    req = os.path.join(ODYSSEUS_DIR, "requirements.txt")
+    if run_stream([uv_bin(), "pip", "install", "--python", odysseus_python(), "-r", req])[0] != 0:
+        say("Odysseus could not be installed - see the messages above.")
+        return None
+    run_stream([uv_bin(), "pip", "install", "--python", odysseus_python(), "ddgs"])  # optional: better web search
+    if not odysseus_first_setup():
+        return None
+    port = info.get("port", ODYSSEUS_PORT)
+    if not odysseus_health(port):
+        port = free_port(ODYSSEUS_PORT)
+        say("Starting Odysseus...")
+        if not start_odysseus(state, port):
+            return None
+    info["port"] = port
+    if github:
+        added = odysseus_add_github(port, github)
+        if added == "added":
+            say("Odysseus can now use GitHub (its agent signs you in with GitHub the first time).")
+        info["github_manual"] = not added
     return f"http://localhost:{port}"
 
 
@@ -1224,11 +1820,12 @@ def special_folder(name):
     return buf.value or None
 
 
-def make_windows_shortcut(path, cmd):
+def make_windows_shortcut(path, cmd, desc="Start Local AI and open the chat"):
     ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:LAI_LNK);"
           "$s.TargetPath=$env:LAI_TARGET;$s.Arguments=$env:LAI_ARGS;$s.WorkingDirectory=$env:LAI_WD;"
-          "$s.Description='Start Local AI and open the chat';$s.Save()")
-    env = ps_env(dict(LAI_LNK=path, LAI_TARGET=cmd[0], LAI_ARGS=subprocess.list2cmdline(cmd[1:]), LAI_WD=STATE_DIR))
+          "$s.Description=$env:LAI_DESC;$s.Save()")
+    env = ps_env(dict(LAI_LNK=path, LAI_TARGET=cmd[0], LAI_ARGS=subprocess.list2cmdline(cmd[1:]), LAI_WD=STATE_DIR,
+                      LAI_DESC=desc))
     try:
         subprocess.call(["powershell", "-NoProfile", "-Command", ps], env=env,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
@@ -1237,37 +1834,37 @@ def make_windows_shortcut(path, cmd):
     return os.path.exists(path)
 
 
-def make_shortcuts(cmd):
-    """Create 'Local AI Chat' on the Desktop (and Start menu / app menu). Returns the paths created."""
+def make_shortcuts(cmd, name="Local AI Chat", desc="Start Local AI and open the chat"):
+    """Create a shortcut on the Desktop (and Start menu / app menu). Returns the paths created."""
     made = []
     try:
         if IS_WIN:
             for folder in (special_folder("Desktop"), special_folder("Programs")):
                 if folder and os.path.isdir(folder):
-                    p = os.path.join(folder, "Local AI Chat.lnk")
-                    if make_windows_shortcut(p, cmd):
+                    p = os.path.join(folder, name + ".lnk")
+                    if make_windows_shortcut(p, cmd, desc):
                         made.append(p)
                     else:  # no PowerShell / COM: a plain batch file does the same job
-                        p = os.path.join(folder, "Local AI Chat.bat")
+                        p = os.path.join(folder, name + ".bat")
                         with open(p, "w", newline="") as f:
                             f.write("@echo off\r\n" + subprocess.list2cmdline(cmd) + "\r\n")
                         made.append(p)
         elif IS_MAC:
             desk = os.path.join(HOME, "Desktop")
             if os.path.isdir(desk):
-                p = os.path.join(desk, "Local AI Chat.command")
+                p = os.path.join(desk, name + ".command")
                 with open(p, "w") as f:
                     f.write("#!/bin/sh\n" + " ".join('"%s"' % c for c in cmd) + "\n")
                 os.chmod(p, 0o755)
                 made.append(p)
         else:
-            entry = ("[Desktop Entry]\nType=Application\nName=Local AI Chat\n"
-                     "Comment=Start Local AI and open the chat\nTerminal=true\nIcon=utilities-terminal\n"
+            entry = (f"[Desktop Entry]\nType=Application\nName={name}\n"
+                     f"Comment={desc}\nTerminal=true\nIcon=utilities-terminal\n"
                      "Exec=" + " ".join('"%s"' % c for c in cmd) + "\n")
             desk = run(["xdg-user-dir", "DESKTOP"]) if have("xdg-user-dir") else ""
             for folder in (desk or os.path.join(HOME, "Desktop"), os.path.join(HOME, ".local", "share", "applications")):
                 if os.path.isdir(folder):
-                    p = os.path.join(folder, "Local AI Chat.desktop")
+                    p = os.path.join(folder, name + ".desktop")
                     with open(p, "w") as f:
                         f.write(entry)
                     os.chmod(p, 0o755)
@@ -1305,6 +1902,9 @@ def health_check(state, repair=True, generate=True, verified=()):
         tag = state.get(key)
         if tag:
             add(f"{label} is downloaded", has_model(tag, names), tag, critical=False)
+    pdp = (state.get("pewdiepie") or {}).get("tag")
+    if pdp:
+        add("PewDiePie's model is downloaded", has_model(pdp, names), pdp, critical=False)
     if state.get("webui"):
         port = state.get("webui_port", DEFAULT_PORT)
         chat_tag = (state.get("chat") or {}).get("tag")
@@ -1317,6 +1917,14 @@ def health_check(state, repair=True, generate=True, verified=()):
         coder = (state.get("coder") or {}).get("tag", "")
         chat = (state.get("chat") or {}).get("tag", "")
         add("Continue is configured for your models", continue_config_ok(coder, chat), critical=False)
+    if state.get("github"):
+        add("GitHub connector works", github_works(),
+            "can make changes" if state["github"].get("write") else "read-only", critical=False)
+    ody = state.get("odysseus")
+    if ody:
+        port = ody.get("port", ODYSSEUS_PORT)
+        ok = odysseus_health(port) or (repair and start_odysseus(state, port))
+        add(f"Odysseus (PewDiePie's AI workspace) is running at http://localhost:{port}", bool(ok), critical=False)
     return results
 
 
@@ -1338,7 +1946,7 @@ def check_mode(a):
 
 
 def launch(a):
-    """Start everything that isn't running and open the chat. Fast; no research or installs."""
+    """Start everything that isn't running and open the chat (or Odysseus). Fast; no research or installs."""
     state = load_state()
     chat = (state.get("chat") or {}).get("tag")
     if not chat:
@@ -1348,6 +1956,18 @@ def launch(a):
     if not start_ollama():
         say("The Ollama engine could not be started. Run the installer again to repair it.")
         return 1
+    ody = state.get("odysseus")
+    if a.launch == "odysseus" and ody and odysseus_installed():  # only runs when you open it: its agent is powerful
+        port = ody.get("port", ODYSSEUS_PORT)
+        if not odysseus_health(port):
+            say("Starting Odysseus (can take a minute)...")
+            start_odysseus(state, port)
+        if odysseus_health(port):
+            if not a.no_open:
+                open_url(f"http://localhost:{port}")
+            time.sleep(2)
+            return 0
+        say("Odysseus did not start; opening the chat instead.")
     if state.get("webui"):
         port = state.get("webui_port", DEFAULT_PORT)
         if not webui_health(port):
@@ -1371,7 +1991,14 @@ def build_parser():
     ap.add_argument("-y", "--yes", action="store_true", help="don't ask questions")
     ap.add_argument("--offline", action="store_true", help="skip the live Hugging Face research (use the built-in list)")
     ap.add_argument("--check", action="store_true", help="health-check (and repair) an existing install")
-    ap.add_argument("--launch", action="store_true", help="start everything and open the chat (used by the shortcut)")
+    ap.add_argument("--launch", nargs="?", const="chat", choices=["chat", "odysseus"],
+                    help="start everything and open the chat, or Odysseus (what the desktop shortcuts run)")
+    ap.add_argument("--odysseus", action="store_true",
+                    help="also install Odysseus, PewDiePie's AI workspace (its agent can run commands on this PC)")
+    ap.add_argument("--github", action="store_true", help="let your AI read your GitHub (read-only)")
+    ap.add_argument("--github-write", action="store_true",
+                    help="let your AI also make changes on GitHub (push code, open issues / pull requests)")
+    ap.add_argument("--no-pewdiepie", action="store_true", help="don't look for PewDiePie's own AI model")
     ap.add_argument("--no-webui", action="store_true", help="skip Open WebUI (the browser chat)")
     ap.add_argument("--no-vscode", action="store_true", help="skip the VS Code coding plug-in")
     ap.add_argument("--no-open", action="store_true", help="don't open the browser when finished")
@@ -1433,23 +2060,57 @@ def main(argv=None):
         coder_opts, up_c = decide("coder", coder_opts, live["coder"], state)
         chat_opts, up_h = decide("chat", chat_opts, live["chat"], state)
         old_models = {k: state[k]["tag"] for k, up in (("coder", up_c), ("chat", up_h)) if up}
+    say("\nLooking for PewDiePie's own AI (his Ajax model) - official sources only...")
+    pdp, pdp_old = {"status": "skipped"}, (state.get("pewdiepie") or {}).get("tag")
+    if a.offline or a.no_pewdiepie:
+        say("  skipped (--offline / --no-pewdiepie)")
+    else:
+        try:
+            pdp = pewdiepie_ai(spec["usable_gb"] * 0.85)
+        except Exception:  # an optional lookup must never stop the install
+            _log(traceback.format_exc())
+            pdp = {"status": "unreachable"}
+        show_pewdiepie(pdp, spec["usable_gb"])
+    pdp_new = pdp["tag"] if pdp.get("status") == "found" else None
+    say("")
     for kind, title, opts in (("coder", "Coding model", coder_opts), ("chat", "Chat model  ", chat_opts)):
         note = "unlocked" if is_unlocked(opts[0]) else "standard model - no unlocked one fits this PC"
         say(f"{title}: {opts[0]}  ({note})")
+    if pdp_new or pdp_old:
+        say(f"PewDiePie's : {pdp_new or pdp_old}  (Ajax)")
     say("Engine:       Ollama (runs on NVIDIA / AMD / Apple GPUs, or the CPU)")
     say(f"Plug-ins:     {'; '.join(d for _, d in VSCODE_PLUGINS)}; Open WebUI (chat in your browser)")
     if spec["usable_gb"] < 4:
         say("NOTE: low memory - expect slow answers; a smaller model or a GPU would help.")
+
+    had_ody = bool(state.get("odysseus")) and odysseus_installed()
+    want_ody = had_ody or a.odysseus
+    want_gh = bool(state.get("github")) or a.github or a.github_write
+    if not (a.dry_run or a.yes):
+        if not want_ody:
+            say("\nOptional: Odysseus, PewDiePie's open-source AI workspace (chat, agents, deep research, notes).")
+            say("  Its agent can run commands and edit files on this PC as you. It asks first once it has read web")
+            say("  pages or emails, but it is NOT sandboxed: only use it if your important files are backed up.")
+            want_ody = confirm("  Install Odysseus?", False, default=False)
+        if not want_gh and (want_ody or not a.no_vscode):
+            say("\nOptional: let your AI read your GitHub (repos, issues, pull requests) - read-only. You sign in")
+            say("  with GitHub in your browser the first time it's used; no password or token is saved.")
+            want_gh = confirm("  Connect GitHub?", False)
+    say(f"Extras:       Odysseus (PewDiePie's AI workspace): {'yes' if want_ody else 'no (add --odysseus)'}; "
+        f"GitHub for your AI: {('yes, can make changes' if a.github_write else 'yes, read-only') if want_gh else 'no (add --github)'}")
 
     mdir = models_dir(a.models_dir)
     need = 0.0
     for kind, opts in (("coder", coder_opts), ("chat", chat_opts)):
         if not (updating and state.get(kind, {}).get("tag") == opts[0]):  # already on disk -> no new space
             need += est_size_gb(opts[0], live[kind])
+    if pdp_new and pdp_new != pdp_old:
+        need += pdp.get("size_gb") or 6.0                              # PewDiePie's model
     if not updating:
         need += 0.3                                                     # code-search model
         need += 0 if a.no_vscode else 1.1                              # autocomplete model
         need += 0 if a.no_webui else 5.0                               # Open WebUI + private Python
+    need += 1.5 if want_ody and not had_ody else 0                     # Odysseus + its private Python
     free = free_gb(mdir)
     say(f"\nStorage: needs about {need:.1f} GB; {free:.1f} GB free where models are stored ({mdir})")
     say("         Models must live on a local drive - cloud-synced folders (Google Drive, OneDrive) are too slow "
@@ -1492,6 +2153,30 @@ def main(argv=None):
     if not (coder and chat):
         say("ERROR: model download failed (check your internet connection and free disk space).")
         return 1
+    pdp_tag = None
+    if pdp_new:
+        pdp_tag = pull_working([pdp_new], CHAT_PROMPT, "PewDiePie's model")
+        if not pdp_tag:
+            say("  PewDiePie's model could not be installed this time - everything else works without it.")
+        elif pdp_old and pdp_old != pdp_tag:
+            old_models["PewDiePie"] = pdp_old
+    if not pdp_tag and pdp_old and has_model(pdp_old, installed_models()):
+        pdp_tag = pdp_old  # keep the one you have
+
+    gh_cmd = None
+    if IS_WIN and (want_ody or want_gh):
+        ensure_git()
+    if want_gh:
+        try:
+            gh_version = install_github_mcp(state)
+        except Exception:  # optional extra: never let it stop the install
+            _log(traceback.format_exc())
+            gh_version = None
+        if gh_version:
+            gh_cmd = github_cmd(a.github_write)
+            state["github"] = {"version": gh_version, "write": a.github_write}
+        else:
+            say("  GitHub could not be connected this time - run this again to retry.")
 
     code_ok, auto = False, None
     if not a.no_vscode:
@@ -1500,22 +2185,37 @@ def main(argv=None):
             code = install_vscode()
         if code:
             auto = pull_first(AUTOCOMPLETE_TAGS)
-            code_ok = install_vscode_plugins(code) and write_continue_config(coder, chat, auto)
+            code_ok = install_vscode_plugins(code) and write_continue_config(coder, chat, auto, pdp_tag, gh_cmd)
         else:
             say("VS Code not found - skipping the coding plug-in (install VS Code and run this again).")
 
     url = None if a.no_webui else setup_webui(state, chat)
+    ody_url = None
+    if want_ody:
+        try:
+            ody_url = setup_odysseus(state, gh_cmd)
+        except Exception:  # optional extra: never let it stop the install
+            _log(traceback.format_exc())
+        if not ody_url:
+            say("Odysseus could not be set up - see the messages above. Everything else works without it.")
 
     made = []
     copy = install_self_copy()
     if copy and not a.no_shortcut:
         made = make_shortcuts(launcher_cmd(copy))
+        if ody_url:
+            made += make_shortcuts(launcher_cmd(copy) + ["odysseus"], "Odysseus AI",
+                                   "Start Odysseus, PewDiePie's AI workspace")
         for p in made:
             say(f"Created shortcut: {p}")
 
     def entry(tag, cands):
         return {"tag": tag, "score": next((c["score"] for c in cands if c["tag"] == tag), None)}
 
+    if not pdp_tag:
+        state.pop("pewdiepie", None)
+    elif pdp_tag == pdp_new:
+        state["pewdiepie"] = {"tag": pdp_tag, "repo": pdp.get("official")}
     state.update(coder=entry(coder, live["coder"]), chat=entry(chat, live["chat"]), embed=embed,
                  autocomplete=auto, models_dir=mdir, vscode=code_ok, webui=bool(url), shortcuts=made)
     save_state(state)
@@ -1526,6 +2226,12 @@ def main(argv=None):
         results.append(("Open WebUI chat", False, "", True))
         say("  [!!] Open WebUI (the browser chat) could not be set up - see the messages above. "
             "Run this installer again to retry.")
+    if want_ody and not ody_url:
+        results.append(("Odysseus", False, "", False))
+        say("  [!!] Odysseus could not be set up - see the messages above. Run this installer again to retry.")
+    if want_gh and not gh_cmd:
+        results.append(("GitHub connector", False, "", False))
+        say("  [!!] GitHub could not be connected - run this installer again to retry.")
     ready = all_ok(results)
     if ready:
         for kind, old in old_models.items():
@@ -1537,18 +2243,37 @@ def main(argv=None):
 
     bar = "=" * 64
     say(f"\n{bar}")
-    say(" READY - everything is installed and working." if ready else
+    say(" READY - everything is installed and working." if ready and all(r[1] for r in results) else
+        " READY - your AI works, but some extras need attention ([!!] lines)." if ready else
         " INSTALLED, but something above needs attention ([!!] lines).")
     say(bar)
     if url:
         say(f"  Chat in your browser : {url}")
         say("      first time: click 'Get started' and create a local account (it never leaves your PC)")
+    if pdp_tag:
+        say(f"  PewDiePie's Ajax     : pick {pdp_tag} in the chat's model list")
     if code_ok:
         say("  Coding in VS Code    : open VS Code -> Continue panel (Ctrl+L / Cmd+L)")
+    if ody_url:
+        say(f"  Odysseus (PewDiePie) : {ody_url}" + ("  - or double-click 'Odysseus AI' on your Desktop" if made else ""))
+        password = odysseus_password()
+        if password:
+            say_private(f"      log in as '{ODYSSEUS_USER}' with password {password}  (also saved in {ODYSSEUS_LOGIN})")
+    if gh_cmd:
+        apps = " and ".join(n for n, ok in (("VS Code (Continue -> Agent mode)", code_ok), ("Odysseus", ody_url)) if ok)
+        if apps:
+            say(f"  GitHub               : {'can read and change' if a.github_write else 'read-only access to'} your "
+                f"GitHub from {apps}")
+            say("      the first time the AI uses it, your browser opens GitHub's sign-in page")
+        else:
+            say("  GitHub               : connector installed, but nothing uses it yet (it needs VS Code or Odysseus)")
+        if ody_url and (state.get("odysseus") or {}).get("github_manual"):
+            say(f"      Odysseus: add it in Settings -> MCP: command {gh_cmd[0]}  args {json.dumps(gh_cmd[1:])}")
     say(f"  Terminal chat        : ollama run {chat}")
     if made:
         say("  Next time            : double-click 'Local AI Chat' on your Desktop")
-    say("  Update later         : run this installer again (it only downloads what is new)")
+    say("  Update later         : run this installer again (it only downloads what is new"
+        + (", and checks for PewDiePie's AI)" if not a.no_pewdiepie else ")"))
     say(f"  Log file             : {LOG_FILE}")
     if not a.no_open:
         if url:
@@ -1556,6 +2281,8 @@ def main(argv=None):
         elif not a.no_webui:
             say("  The browser chat is not available, so opening a terminal chat instead.")
             open_terminal_chat(chat)
+        if ody_url and not had_ody:
+            open_url(ody_url)
     return 0 if ready else 1
 
 
