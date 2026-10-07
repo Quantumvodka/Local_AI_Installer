@@ -7,15 +7,27 @@ One script that sizes up your PC and sets up an uncensored local AI for coding a
 3. **Installs** Ollama, pulls the models, adds the Continue VS Code extension (pre-configured), and optionally Open WebUI (Docker).
 4. **Verifies** with a real prompt and prints how to use it.
 
-## Quick start (share this)
+## Download (easiest - send people this)
+
+Go to the **[Releases page](https://github.com/Quantumvodka/Local_AI_Installer/releases/latest)** and download:
+
+| Your PC | Download | Then |
+|---|---|---|
+| Windows | `LocalAIInstaller-Windows.exe` (or `Install-Windows.bat`) | double-click. If SmartScreen warns, click *More info -> Run anyway* (the app is unsigned) |
+| Mac | `Install-Mac.command` | right-click -> Open (first time only) |
+| Linux | `Install-Linux.sh` | `sh Install-Linux.sh` |
+
+The `.bat`/`.command`/`.sh` files are tiny launchers that fetch the latest installer; the `.exe`/binaries are self-contained.
+
+## Quick start (command line)
 
 **Windows** (PowerShell):
 ```powershell
-irm https://raw.githubusercontent.com/quantumvodka/local_ai_installer/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main/install.ps1 | iex
 ```
 **macOS / Linux**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/quantumvodka/local_ai_installer/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/main/install.sh | sh
 ```
 Add `-s -- --dry-run` after `sh` (Linux/macOS) to preview without installing.
 

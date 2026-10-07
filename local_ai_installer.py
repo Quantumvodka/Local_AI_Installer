@@ -477,4 +477,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    if getattr(sys, "frozen", False) and sys.stdin.isatty():  # double-clicked .exe: keep window open
+        input("\nPress Enter to close...")
+    sys.exit(code)
