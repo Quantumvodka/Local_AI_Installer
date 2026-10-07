@@ -23,6 +23,12 @@ import urllib.request
 
 OS = platform.system()  # Linux / Darwin / Windows
 OLLAMA_API = "http://127.0.0.1:11434"
+VERSION = "1.1.0"
+REPO = "Quantumvodka/Local_AI_Installer"
+STATE_DIR = os.path.join(os.path.expanduser("~"), ".local_ai_installer")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+MANAGED_MARK = "# managed by Local AI Installer"
+UPGRADE_MARGIN = 1.10  # only switch models if the new one scores >=10% higher
 
 # ---------------------------------------------------------------- catalog
 # Tiers keyed by usable GB of GPU VRAM (or unified/system memory share).
@@ -274,6 +280,87 @@ def show(cands, label):
             f"{c['downloads']:,} downloads]")
 
 
+def est_size_gb(tag, cands):
+    """Download size estimate: exact for live candidates, ~Q4 params*0.6 for curated tags."""
+    for c in cands:
+        if c["tag"] == tag:
+            return c["size_gb"]
+    m = re.search(r"(\d+(?:\.\d+)?)b", tag.lower())
+    return round(float(m.group(1)) * 0.6, 1) if m else 5.0
+
+
+def free_gb(path):
+    while path and not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return shutil.disk_usage(path or ".").free / 1024**3
+
+
+def models_dir(arg):
+    return os.path.abspath(os.path.expanduser(
+        arg or os.environ.get("OLLAMA_MODELS") or os.path.join("~", ".ollama", "models")))
+
+
+# ---------------------------------------------------------------- state / updates
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    state["installer_version"] = VERSION
+    state["updated"] = time.strftime("%Y-%m-%d")
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def check_self_update():
+    """Tell the user if a newer installer release exists (launchers always fetch the latest anyway)."""
+    try:
+        tag = hf_get(f"https://api.github.com/repos/{REPO}/releases/latest", timeout=8)["tag_name"]
+    except Exception:
+        return
+    if tag.lstrip("v") != VERSION:
+        if getattr(sys, "frozen", False):
+            say(f"A new installer version ({tag}) is available: https://github.com/{REPO}/releases/latest")
+        else:
+            say(f"Installer {tag} is out (you have v{VERSION}); the launchers fetch the newest script automatically.")
+
+
+def decide(kind, opts, live, state):
+    """Keep the installed model unless a clearly better one exists. Returns (opts, upgrading)."""
+    old = state.get(kind, {}).get("tag")
+    if not old:
+        return opts, False
+    top = live[0] if live else None
+    if opts[0] == old:
+        say(f"{kind}: {old} is still the best pick - no change.")
+        return [old], False
+    cur = next((c for c in live if c["tag"] == old), None)
+    if cur and top and cur["score"] * UPGRADE_MARGIN >= top["score"]:
+        say(f"{kind}: newer option {opts[0]} isn't clearly better than {old} - keeping {old}.")
+        return [old], False
+    say(f"{kind}: upgrade available: {old} -> {opts[0]}")
+    return opts, True
+
+
+def upgrade_ollama():
+    say("Updating Ollama...")
+    if OS == "Linux":
+        subprocess.call("curl -fsSL https://ollama.com/install.sh | sh", shell=True)
+    elif OS == "Darwin" and have("brew"):
+        subprocess.call(["brew", "upgrade", "ollama"])
+    elif OS == "Windows" and have("winget"):
+        subprocess.call(["winget", "upgrade", "-e", "--id", "Ollama.Ollama",
+                         "--accept-source-agreements", "--accept-package-agreements"])
+
+
 # ---------------------------------------------------------------- 3. install
 def ollama_up():
     try:
@@ -310,7 +397,7 @@ def start_ollama():
     say("Starting Ollama server...")
     kw = {"creationflags": 0x00000008} if OS == "Windows" else {"start_new_session": True}
     try:
-        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=os.environ.copy(), **kw)
     except OSError:
         return False
     for _ in range(30):
@@ -343,8 +430,12 @@ def write_continue_config(coder, chat):
     path = os.path.join(os.path.expanduser("~"), ".continue", "config.yaml")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.exists(path):
+        if MANAGED_MARK not in open(path).read():
+            say(f"Your Continue config was edited by you, so it was left alone. Point it at: coder={coder} chat={chat}")
+            return
         shutil.copy(path, path + ".bak")
-    cfg = f"""name: Local AI
+    cfg = f"""{MANAGED_MARK} - delete this line to stop automatic updates of this file
+name: Local AI
 version: 1.0.0
 schema: v1
 models:
@@ -370,6 +461,7 @@ def install_webui():
     """Open WebUI: ChatGPT-style browser UI for Ollama. Uses Docker if present, else pip venv."""
     if have("docker"):
         say("Starting Open WebUI via Docker on http://localhost:3000 ...")
+        subprocess.call(["docker", "pull", "ghcr.io/open-webui/open-webui:main"])
         subprocess.call(["docker", "rm", "-f", "open-webui"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         rc = subprocess.call(["docker", "run", "-d", "--name", "open-webui", "--restart", "always",
                               "--add-host=host.docker.internal:host-gateway", "-p", "3000:8080",
@@ -404,7 +496,16 @@ def main():
     ap.add_argument("--offline", action="store_true", help="skip live Hugging Face trend lookup")
     ap.add_argument("--no-webui", action="store_true")
     ap.add_argument("--no-vscode", action="store_true")
+    ap.add_argument("--prune", action="store_true", help="after an upgrade, delete the old model to free space")
+    ap.add_argument("--version", action="version", version=f"Local AI Installer v{VERSION}")
+    ap.add_argument("--models-dir", help="store downloaded models here (e.g. a big external SSD). Must be a LOCAL drive, not Google Drive/OneDrive/network")
     a = ap.parse_args()
+
+    state = load_state()
+    updating = bool(state.get("coder"))
+    say(f"Local AI Installer v{VERSION}" + ("  -  UPDATE MODE (your chats, projects and settings are kept)" if updating else ""))
+    if not a.offline:
+        check_self_update()
 
     step(1, "Detecting your PC")
     spec = detect()
@@ -438,18 +539,51 @@ def main():
         say(f"Tier:       {rec['tier']}")
         say(f"Coding:     {coder_opts[0]}")
         say(f"Chat/LLM:   {chat_opts[0]}")
+    old_models = {}
+    if updating:
+        say("\nChecking your installed models against the latest research...")
+        coder_opts, up_c = decide("coder", coder_opts, live["coder"], state)
+        chat_opts, up_h = decide("chat", chat_opts, live["chat"], state)
+        old_models = {k: state[k]["tag"] for k, up in (("coder", up_c), ("chat", up_h)) if up}
     say("Runtime:    Ollama (llama.cpp engine; CUDA / ROCm / Metal / CPU auto-selected)")
     say(f"Embeddings: {EMBED_MODEL}")
     say("Plug-ins:   " + "; ".join(d for _, d in VSCODE_PLUGINS) + "; Open WebUI (browser chat UI)")
     if spec["usable_gb"] < 4:
         say("NOTE: low memory - expect slow responses; consider a smaller quant or a GPU.")
+    mdir = models_dir(a.models_dir)
+    need = 0.0
+    for kind, opts in (("coder", coder_opts), ("chat", chat_opts)):
+        if not (updating and state.get(kind, {}).get("tag") == opts[0]):  # already on disk -> no new space
+            need += est_size_gb(opts[0], live[kind])
+    need += 0 if updating else 0.3
+    need += 0 if (a.no_webui or updating) else 4.0  # Open WebUI docker image
+    free = free_gb(mdir)
+    say(f"\nStorage: needs ~{need:.1f} GB (models + extras); {free:.1f} GB free where models are stored ({mdir})")
+    say("         Models must live on a local drive - cloud-synced folders (Google Drive, OneDrive) are too slow and can corrupt them.")
+    if re.search(r"google ?drive|onedrive|dropbox|icloud", mdir, re.I):
+        say("ERROR: that folder looks cloud-synced. Choose a local/external drive with --models-dir.")
+        return 1
+    low_space = free < need * 1.15
+    if low_space:
+        say("WARNING: not enough free space. Free some up, choose a bigger drive with --models-dir, or pick a smaller tier.")
     if a.dry_run:
         say("\nDry run: nothing installed.")
         return 0
+    if low_space:
+        return 1
     if not confirm("\nProceed with install?", a.yes):
         return 0
+    if a.models_dir:
+        os.environ["OLLAMA_MODELS"] = mdir
+        os.makedirs(mdir, exist_ok=True)
+        if OS == "Windows":
+            subprocess.call(["setx", "OLLAMA_MODELS", mdir], stdout=subprocess.DEVNULL)
+        else:
+            say(f"Add this to your shell profile so it persists: export OLLAMA_MODELS={mdir}")
 
     step(3, "Installing")
+    if updating and have("ollama"):
+        upgrade_ollama()
     if not install_ollama() or not start_ollama():
         say("ERROR: could not install/start Ollama. See https://ollama.com/download")
         return 1
@@ -466,6 +600,17 @@ def main():
 
     step(4, "Verifying")
     ok = verify(coder)
+    if ok:
+        def entry(tag, cands):
+            return {"tag": tag, "score": next((c["score"] for c in cands if c["tag"] == tag), None)}
+        state.update(coder=entry(coder, live["coder"]), chat=entry(chat, live["chat"]),
+                     models_dir=mdir, webui=bool(url))
+        save_state(state)
+        for kind, old in old_models.items():
+            if a.prune or (not a.yes and confirm(f"Upgrade worked. Delete old {kind} model {old} to free space?", False)):
+                subprocess.call(["ollama", "rm", old])
+            else:
+                say(f"Kept old model {old} (remove later with: ollama rm {old})")
     say("\n" + ("READY." if ok else "Installed, but the smoke test failed - run `ollama run " + coder + "`."))
     say(f"  Terminal chat : ollama run {chat}")
     say(f"  Coding model  : ollama run {coder}")
