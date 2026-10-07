@@ -274,6 +274,29 @@ def show(cands, label):
             f"{c['downloads']:,} downloads]")
 
 
+def est_size_gb(tag, cands):
+    """Download size estimate: exact for live candidates, ~Q4 params*0.6 for curated tags."""
+    for c in cands:
+        if c["tag"] == tag:
+            return c["size_gb"]
+    m = re.search(r"(\d+(?:\.\d+)?)b", tag.lower())
+    return round(float(m.group(1)) * 0.6, 1) if m else 5.0
+
+
+def free_gb(path):
+    while path and not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return shutil.disk_usage(path or ".").free / 1024**3
+
+
+def models_dir(arg):
+    return os.path.abspath(os.path.expanduser(
+        arg or os.environ.get("OLLAMA_MODELS") or os.path.join("~", ".ollama", "models")))
+
+
 # ---------------------------------------------------------------- 3. install
 def ollama_up():
     try:
@@ -310,7 +333,7 @@ def start_ollama():
     say("Starting Ollama server...")
     kw = {"creationflags": 0x00000008} if OS == "Windows" else {"start_new_session": True}
     try:
-        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=os.environ.copy(), **kw)
     except OSError:
         return False
     for _ in range(30):
@@ -404,6 +427,7 @@ def main():
     ap.add_argument("--offline", action="store_true", help="skip live Hugging Face trend lookup")
     ap.add_argument("--no-webui", action="store_true")
     ap.add_argument("--no-vscode", action="store_true")
+    ap.add_argument("--models-dir", help="store downloaded models here (e.g. a big external SSD). Must be a LOCAL drive, not Google Drive/OneDrive/network")
     a = ap.parse_args()
 
     step(1, "Detecting your PC")
@@ -443,11 +467,32 @@ def main():
     say("Plug-ins:   " + "; ".join(d for _, d in VSCODE_PLUGINS) + "; Open WebUI (browser chat UI)")
     if spec["usable_gb"] < 4:
         say("NOTE: low memory - expect slow responses; consider a smaller quant or a GPU.")
+    mdir = models_dir(a.models_dir)
+    need = est_size_gb(coder_opts[0], live["coder"]) + est_size_gb(chat_opts[0], live["chat"]) + 0.3
+    need += 0 if a.no_webui else 4.0  # Open WebUI docker image
+    free = free_gb(mdir)
+    say(f"\nStorage: needs ~{need:.1f} GB (models + extras); {free:.1f} GB free where models are stored ({mdir})")
+    say("         Models must live on a local drive - cloud-synced folders (Google Drive, OneDrive) are too slow and can corrupt them.")
+    if re.search(r"google ?drive|onedrive|dropbox|icloud", mdir, re.I):
+        say("ERROR: that folder looks cloud-synced. Choose a local/external drive with --models-dir.")
+        return 1
+    low_space = free < need * 1.15
+    if low_space:
+        say("WARNING: not enough free space. Free some up, choose a bigger drive with --models-dir, or pick a smaller tier.")
     if a.dry_run:
         say("\nDry run: nothing installed.")
         return 0
+    if low_space:
+        return 1
     if not confirm("\nProceed with install?", a.yes):
         return 0
+    if a.models_dir:
+        os.environ["OLLAMA_MODELS"] = mdir
+        os.makedirs(mdir, exist_ok=True)
+        if OS == "Windows":
+            subprocess.call(["setx", "OLLAMA_MODELS", mdir], stdout=subprocess.DEVNULL)
+        else:
+            say(f"Add this to your shell profile so it persists: export OLLAMA_MODELS={mdir}")
 
     step(3, "Installing")
     if not install_ollama() or not start_ollama():
