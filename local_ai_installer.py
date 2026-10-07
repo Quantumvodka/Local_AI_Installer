@@ -56,7 +56,7 @@ WEBUI_LOG = os.path.join(STATE_DIR, "webui.log")
 DEFAULT_PORT = 3210
 MANAGED_MARK = "# managed by Local AI Installer"
 UPGRADE_MARGIN = 1.10  # only switch models if the new one scores >=10% higher
-CPU_CAP_GB = 9.0       # CPU-only PCs: bigger models than this are painfully slow
+CPU_CAP_GB = 7.0       # CPU-only PCs: bigger models than this are painfully slow
 
 # ---------------------------------------------------------------- catalog
 # Offline fallback, used when live research finds nothing. Tiers are keyed by usable GB of GPU
@@ -382,8 +382,9 @@ def detect(max_gb=None):
 # that fit THIS machine, then rank by capability / recency / popularity.
 HF = "https://huggingface.co/api/models"
 UNLOCK_TERMS = ["abliterated", "uncensored", "dolphin", "heretic", "josiefied", "unfiltered"]
-BAD_NAME = re.compile(r"(?<![a-z0-9])(lora|draft|embed\w*|rerank\w*|mmproj|guard|tts|whisper|awq|gptq|mlx|base)(?![a-z0-9])",
-                      re.I)
+BAD_NAME = re.compile(r"(?<![a-z0-9])(lora|draft|embed\w*|rerank\w*|mmproj|guard|tts|whisper|awq|gptq|mlx|base|"
+                      r"encoders?|decoders?|images?|flux\d*|sdxl|diffusion|vae|clip|siglip)(?![a-z0-9])", re.I)
+CODER_RE = re.compile(r"(?<![a-z])(coder|coding|code|codestral|codellama|codegemma|starcoder\d*|devstral)(?![a-z])")
 # quant label -> quality factor (relative to full precision) and nominal bits per weight
 QUANTS = {"Q8_0": 1.0, "Q6_K_L": 0.995, "Q6_K": 0.99, "Q5_K_L": 0.975, "Q5_K_M": 0.97, "Q5_K_S": 0.96,
           "Q4_K_L": 0.94, "Q4_K_M": 0.93, "Q4_K_S": 0.91, "IQ4_XS": 0.90, "Q4_0": 0.88,
@@ -462,7 +463,7 @@ def rank_candidates(models, budget_gb, want, detail=None, top_n=12, stats=None):
         low = rid.lower()
         if not rid or BAD_NAME.search(rid) or not any(t in low for t in UNLOCK_TERMS):
             continue
-        if ("cod" in low) != (want == "coder"):
+        if bool(CODER_RE.search(low)) != (want == "coder"):
             continue
         age = months_old(m.get("createdAt") or m.get("lastModified"))
         if age is not None and age > MAX_AGE_MONTHS:
@@ -767,6 +768,24 @@ def pull_first(tags):
         if subprocess.call([ollama_bin(), "pull", tag]) == 0:
             return tag
         say(f"  {tag} could not be downloaded, trying the next option...")
+    return None
+
+
+CODE_PROMPT = "Write a Python one-liner that reverses a string. Code only."
+CHAT_PROMPT = "Say hello in one short sentence."
+
+
+def pull_working(tags, prompt, label):
+    """Download the first model that both downloads AND actually runs here (new architectures may not)."""
+    for tag in tags:
+        say(f"Downloading model {tag} ...")
+        if subprocess.call([ollama_bin(), "pull", tag]) != 0:
+            say(f"  {tag} could not be downloaded, trying the next option...")
+            continue
+        if verify(tag, prompt, label):
+            return tag
+        say(f"  {tag} downloaded but does not run on this PC / Ollama version; removing it and trying the next option...")
+        subprocess.call([ollama_bin(), "rm", tag])
     return None
 
 
@@ -1186,7 +1205,7 @@ def make_shortcuts(cmd):
 
 
 # ---------------------------------------------------------------- 4. health check
-def health_check(state, repair=True, generate=True):
+def health_check(state, repair=True, generate=True, verified=()):
     """Check every piece. Returns a list of (name, ok, detail, critical)."""
     results = []
 
@@ -1197,8 +1216,7 @@ def health_check(state, repair=True, generate=True):
     up = ollama_up() or (repair and start_ollama())
     add("Ollama engine is running", bool(up))
     names = installed_models() if up else []
-    models = [("coder", "Coding model", "Write a Python one-liner that reverses a string. Code only."),
-              ("chat", "Chat model", "Say hello in one short sentence.")]
+    models = [("coder", "Coding model", CODE_PROMPT), ("chat", "Chat model", CHAT_PROMPT)]
     for kind, label, prompt in models:
         tag = (state.get(kind) or {}).get("tag")
         if not tag:
@@ -1206,7 +1224,10 @@ def health_check(state, repair=True, generate=True):
         present = has_model(tag, names)
         add(f"{label} is downloaded", present, tag)
         if generate and present:
-            add(f"{label} answers a test question", verify(tag, prompt, label.lower()))
+            if tag in verified:
+                add(f"{label} answers a test question", True, "tested during the download")
+            else:
+                add(f"{label} answers a test question", verify(tag, prompt, label.lower()))
     for key, label in (("embed", "Code-search model"), ("autocomplete", "Autocomplete model")):
         tag = state.get(key)
         if tag:
@@ -1392,8 +1413,8 @@ def main(argv=None):
     if not install_ollama() or not start_ollama():
         say("ERROR: could not install/start Ollama. See https://ollama.com/download")
         return 1
-    coder = pull_first(coder_opts)
-    chat = pull_first(chat_opts)
+    coder = pull_working(coder_opts, CODE_PROMPT, "coding model")
+    chat = pull_working(chat_opts, CHAT_PROMPT, "chat model")
     embed = pull_first([EMBED_MODEL])
     if not (coder and chat):
         say("ERROR: model download failed (check your internet connection and free disk space).")
@@ -1427,7 +1448,7 @@ def main(argv=None):
     save_state(state)
 
     step(4, "Checking that everything works")
-    results = health_check(state)
+    results = health_check(state, verified={coder, chat})
     if not a.no_webui and not url:
         results.append(("Open WebUI chat", False, "", True))
         say("  [!!] Open WebUI (the browser chat) could not be set up - see the messages above. "

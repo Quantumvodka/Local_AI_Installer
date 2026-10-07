@@ -71,7 +71,7 @@ The installer shows how much space it needs and stops if you don't have enough. 
 
 It searches Hugging Face for GGUF models tagged abliterated / uncensored / dolphin / heretic / josiefied / unfiltered (no older than 20 months), reads each repo's real file sizes, keeps only quantizations that fit your usable memory (85%, leaving room for context), and ranks them by **parameters x quality of quantization x recency (halves every 9 months) x popularity**. The winner is downloaded with `ollama pull hf.co/<repo>:<quant>`; if that fails the next one is tried, then the built-in list.
 
-This is a heuristic, not a benchmark: nobody publishes a trustworthy "best unlocked model for your PC" ranking, so newer + bigger-that-fits + popular is a good proxy, not a guarantee. CPU-only PCs are capped at about 9 GB models because anything bigger is painfully slow.
+This is a heuristic, not a benchmark: nobody publishes a trustworthy "best unlocked model for your PC" ranking, so newer + bigger-that-fits + popular is a good proxy, not a guarantee. CPU-only PCs are capped at about 7 GB models because anything bigger is painfully slow.
 
 ## Troubleshooting
 

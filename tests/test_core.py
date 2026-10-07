@@ -70,9 +70,30 @@ class Research(unittest.TestCase):
         self.assertIsNone(lai.param_b("x/Phi-4-mini-abliterated"))
 
     def test_bad_names_filtered(self):
-        for bad in ("a/foo-abliterated-lora", "a/foo-abliterated-embedding", "a/foo-abliterated-base"):
-            self.assertTrue(lai.BAD_NAME.search(bad), bad)
+        for bad in ("a/foo-abliterated-lora", "a/foo-abliterated-embedding", "a/foo-abliterated-base",
+                    "pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF", "ponpoke/flux2-klein-9b-uncensored-text-encoder",
+                    "a/foo-uncensored-text-encoders", "a/sdxl-uncensored-vae"):
+            self.assertTrue(lai.BAD_NAME.search(bad.lower()), bad)
         self.assertFalse(lai.BAD_NAME.search("a/Colorado-abliterated-14B"))
+
+    def test_coder_detection_ignores_encoder_and_decoder(self):
+        for yes in ("x/gemma-4-12b-coder-heretic-gguf", "x/qwen2.5-coder-14b-abliterated", "x/starcoder2-15b-uncensored",
+                    "x/devstral-small-abliterated", "x/lfm2.5-2.6b-coding-agent-heretic", "x/qwen3-coder-30b-a3b"):
+            self.assertTrue(lai.CODER_RE.search(yes), yes)
+        for no in ("x/qwen-image-text-encoder-heretic", "x/foo-decoder-uncensored", "x/unicode-uncensored",
+                   "x/ornith-1.5-9b-uncensored", "x/dolphin3.0-llama3.1-8b"):
+            self.assertFalse(lai.CODER_RE.search(no), no)
+
+    def test_image_text_encoders_never_ranked_as_coders(self):
+        junk = "pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF"
+        MODELS[junk] = siblings(("Q8_0", 8.1))
+        try:
+            models = listing() + [{"id": junk, "downloads": 900000, "likes": 500, "createdAt": "2026-09-30T00:00:00Z"}]
+            for want in ("coder", "chat"):
+                repos = [c["repo"] for c in lai.rank_candidates(models, 13.0, want, detail=fake_detail)]
+                self.assertNotIn(junk, repos)
+        finally:
+            del MODELS[junk]
 
     def test_months_old(self):
         self.assertIsNone(lai.months_old(None))
@@ -171,16 +192,45 @@ class Helpers(unittest.TestCase):
             try:
                 self.assertTrue(lai.write_continue_config("coder:1", "chat:1", "auto:1"))
                 self.assertTrue(lai.continue_config_ok("coder:1", "chat:1"))
-                text = open(lai.continue_config_path(), encoding="utf-8").read()
-                self.assertIn('model: "auto:1"', text)
+                with open(lai.continue_config_path(), encoding="utf-8") as f:
+                    self.assertIn('model: "auto:1"', f.read())
                 self.assertTrue(lai.write_continue_config("coder:2", "chat:2", None))   # managed file: updated
                 self.assertTrue(lai.continue_config_ok("coder:2", "chat:2"))
                 with open(lai.continue_config_path(), "w", encoding="utf-8") as f:
                     f.write("name: mine\n")
                 self.assertFalse(lai.write_continue_config("coder:3", "chat:3", None))  # user file: untouched
-                self.assertEqual(open(lai.continue_config_path(), encoding="utf-8").read(), "name: mine\n")
+                with open(lai.continue_config_path(), encoding="utf-8") as f:
+                    self.assertEqual(f.read(), "name: mine\n")
             finally:
                 lai.HOME = old_home
+
+
+class Pulling(unittest.TestCase):
+    def run_pull(self, tags, ok_models):
+        calls = []
+        real_call, real_verify = lai.subprocess.call, lai.verify
+
+        def fake_call(cmd, *a, **k):
+            calls.append(list(cmd[1:]))
+            return 1 if cmd[1] == "pull" and cmd[2] == "gone" else 0
+
+        lai.subprocess.call = fake_call
+        lai.verify = lambda tag, prompt, label: tag in ok_models
+        try:
+            return lai.pull_working(tags, "p", "model"), calls
+        finally:
+            lai.subprocess.call, lai.verify = real_call, real_verify
+
+    def test_skips_models_that_cannot_be_downloaded_or_do_not_run(self):
+        got, calls = self.run_pull(["gone", "broken", "good", "never"], {"good", "never"})
+        self.assertEqual(got, "good")
+        self.assertIn(["rm", "broken"], calls)           # downloaded but does not run -> removed
+        self.assertNotIn(["rm", "gone"], calls)          # never downloaded -> nothing to remove
+        self.assertNotIn(["pull", "never"], calls)       # stops at the first working model
+
+    def test_returns_none_when_nothing_works(self):
+        got, _ = self.run_pull(["gone", "broken"], set())
+        self.assertIsNone(got)
 
 
 class Hardware(unittest.TestCase):
