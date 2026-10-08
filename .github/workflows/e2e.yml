@@ -146,7 +146,7 @@ jobs:
               assert got == alias, (role, got)
               names = tags()
               print(role, "->", names)
-              assert alias in names, names
+              assert any(lai.same_tag(n, alias) for n in names), names     # Ollama may add ':latest'
               assert not any(lai.same_tag(n, o) for n in names for o in originals), names   # the original name is gone
           # the copies behave like the originals (the files are shared, so no second download happened)
           emb = post("/api/embed", {"model": lai.EMBED_ALIAS, "input": "hello"})

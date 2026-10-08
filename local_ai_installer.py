@@ -1106,8 +1106,12 @@ def start_ollama(wait=90):
             if ollama_up():
                 return True
     if IS_WIN and find_ollama():  # the command line starts Ollama's tray app hidden (no window) when it's down
-        run([ollama_bin(), "list"], timeout=90)
-        for _ in range(15):
+        try:  # detached, output discarded: the app it starts keeps the pipes open, so waiting on them would never end
+            subprocess.Popen([ollama_bin(), "list"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, **detached_kwargs())
+        except OSError:
+            pass
+        for _ in range(20):
             if ollama_up():
                 return True
             time.sleep(1)
