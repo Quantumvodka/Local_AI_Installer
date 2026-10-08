@@ -269,16 +269,16 @@ class OllamaLocalOnly(Sandbox):
 
     def test_cloud_entries_are_removed(self):
         rows = {"models": [{"name": "glm-5.3:cloud", "remote_host": "https://ollama.com:443"}, {"name": "mine:1"},
-                           {"name": "x:cloud"}]}
+                           {"name": "mine:cloud"}]}
         calls = []
         saved = lai.http_json, lai.subprocess.call
         lai.http_json = lambda url, timeout=15: rows
         lai.subprocess.call = lambda cmd, **k: calls.append(cmd[-1]) or 0
         try:
-            self.assertEqual(lai.remove_cloud_stubs(), ["glm-5.3:cloud", "x:cloud"])
+            self.assertEqual(lai.remove_cloud_stubs(), ["glm-5.3:cloud"])   # a model of yours that merely ends in "cloud" stays
         finally:
             lai.http_json, lai.subprocess.call = saved
-        self.assertEqual(calls, ["glm-5.3:cloud", "x:cloud"])
+        self.assertEqual(calls, ["glm-5.3:cloud"])
 
     def test_our_own_ollama_server_has_cloud_off(self):
         self.assertEqual(lai.ollama_env()["OLLAMA_NO_CLOUD"], "1")
@@ -501,7 +501,8 @@ class ContinueConfig(Sandbox):
                 self.assertTrue(lai.write_continue_config("coder:1", "chat:1", None))
                 time.sleep(1.1)  # the backups are named by the second
         backups = sorted(os.listdir(os.path.dirname(path)))
-        self.assertEqual(len([b for b in backups if b.endswith(".bak")]), 3)
+        self.assertEqual(len([b for b in backups if ".lai-2" in b and b.endswith(".bak")]), 3)
+        self.assertTrue(any(b.endswith("lai-original.bak") for b in backups))        # the first file we replaced is kept for good
         with open(path, encoding="utf-8") as f:
             text = f.read()
         self.assertIn(lai.CONTINUE_NAME, text)
@@ -517,6 +518,66 @@ class ContinueConfig(Sandbox):
         self.assertIn(lai.EMBED_ALIAS, text)
         self.assertNotIn('model: "nomic-embed-text"', text)
         self.assertTrue(lai.continue_config_ok("coder:1", "chat:1"))
+
+
+class Safety(Sandbox):
+    def test_the_coding_model_is_never_removed_as_a_helper(self):
+        with world(present=["qwen2.5-coder:1.5b"]) as w:
+            state = {"pulled": {"qwen2.5-coder:1.5b": {}}}
+            lai.helper_model(state, "autocomplete", lai.AUTOCOMPLETE_TAGS, lai.AUTOCOMPLETE_ALIAS, ["qwen2.5-coder:1.5b"])
+            self.assertIn("qwen2.5-coder:1.5b", w.present)
+            self.assertNotIn("qwen2.5-coder:1.5b", w.removed())
+
+    def test_models_that_may_have_been_yours_are_not_claimed_when_upgrading_from_an_old_install(self):
+        state = {"coder": {"tag": "c"}, "chat": {"tag": "h"}, "embed": "nomic-embed-text", "autocomplete": "a"}
+        lai.migrate_ledger(state)
+        self.assertEqual(sorted(state["pulled"]), ["a", "c", "h"])
+        with world(present=["nomic-embed-text:latest"]) as w:
+            lai.helper_model(state, "embed", [lai.EMBED_MODEL], lai.EMBED_ALIAS)
+            self.assertIn("nomic-embed-text:latest", w.present)         # yours: copied, never removed
+
+    def test_continue_configs_with_anything_extra_are_yours(self):
+        ours = ["coder:1"]
+        for text in ("name: Local AI\nmodels:\n  - model: llama3.1:8b\nrules:\n  - be terse\n",
+                     "name: Local Assistant\nmodels:\n  - {name: x, provider: ollama, model: my-private-finetune}\n",
+                     "name: Local Config\nmodels:\n  - model: coder:1\n    apiBase: http://gpubox.lan:11434\n",
+                     "name: Local AI\nmodels:\n  - uses: ollama/llama3\n",
+                     "name: Local AI\nmodels:\n  - model: coder:1\n    systemMessage: be rude\n",
+                     "# Local AI (managed by Local AI Installer) is a nice tool\nname: mine\n"):
+            self.assertEqual(lai.classify_continue_config(text, ours), "user", text)
+        ok = "name: Local AI\nversion: 1.0.1\nschema: v1\nmodels:\n  - model: coder:1\n    apiBase: http://localhost:11434\n"
+        self.assertEqual(lai.classify_continue_config(ok, ours), "managed")
+
+    def test_the_original_hand_made_config_survives_many_runs(self):
+        path = lai.continue_config_path()
+        os.makedirs(os.path.dirname(path))
+        put(path, "name: Main Config\nversion: 1.0.0\nschema: v1\nmodels: []\n")   # Continue's own default
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(5):
+                lai.write_continue_config("coder:1", "chat:1", None)
+                time.sleep(1.1)
+        with open(path + ".lai-original.bak", encoding="utf-8") as f:
+            self.assertIn("Main Config", f.read())
+
+    def test_only_our_own_temp_folders_are_cleaned(self):
+        tmp = tempfile.mkdtemp()
+        saved = tempfile.gettempdir, lai.clean_legacy_uv_cache
+        tempfile.gettempdir = lambda: tmp
+        lai.clean_legacy_uv_cache = lambda st: 0
+        try:
+            mine, yours = os.path.join(tmp, "lai-uv-abc"), os.path.join(tmp, "lai-project")
+            for d in (mine, yours):
+                os.makedirs(d)
+                put(os.path.join(d, "f.txt"), "x")
+                past = time.time() - 5 * 86400
+                os.utime(d, (past, past))
+            with world():
+                lai.cleanup({}, [])
+            self.assertFalse(os.path.exists(mine))
+            self.assertTrue(os.path.exists(yours))
+        finally:
+            tempfile.gettempdir, lai.clean_legacy_uv_cache = saved
+            lai.shutil.rmtree(tmp, ignore_errors=True)
 
 
 class Tidying(Sandbox):
@@ -680,6 +741,23 @@ class WholeRun(Sandbox):
             self.assertEqual(sorted(w.present), ["hf.co/b/Chat2-heretic-GGUF:Q4_K_M", "hf.co/b/Coder2-heretic-GGUF:Q4_K_M",
                                                  "my-own-model:7b"])
             self.assertIn("Cleaned up: old models", out)
+        finally:
+            w.uninstall()
+
+    def test_update_without_vscode_keeps_the_helper_models_continue_still_uses(self):
+        chat, coder = "hf.co/a/Chat-heretic-GGUF:Q4_K_M", "hf.co/a/Coder-heretic-GGUF:Q4_K_M"
+        auto, emb = lai.AUTOCOMPLETE_ALIAS, lai.EMBED_ALIAS
+        os.makedirs(lai.STATE_DIR, exist_ok=True)
+        jdump({"coder": {"tag": coder, "score": 5}, "chat": {"tag": chat, "score": 5}, "autocomplete": auto, "embed": emb,
+               "vscode": True, "continue_configured": True,
+               "pulled": {coder: {}, chat: {}, auto: {}, emb: {}}}, lai.STATE_FILE)
+        live = {"coder": [self.cand("a/Coder-heretic-GGUF", 10)], "chat": [self.cand("a/Chat-heretic-GGUF", 10)]}
+        w = World(present=[coder, chat, auto, emb]).install()
+        try:
+            rc, out, state = self.run_main(w, live)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(sorted(w.present), sorted([coder, chat, auto, emb]))
+            self.assertEqual((state["autocomplete"], state["embed"], state["vscode"]), (auto, emb, True))
         finally:
             w.uninstall()
 
