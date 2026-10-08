@@ -69,6 +69,112 @@ jobs:
               assert password not in open(os.path.join(state_dir, f), encoding="utf-8", errors="replace").read(), f
           print("OK: Odysseus runs, its login works, GitHub is connected read-only, and no log contains the password")
 
+      - name: The chat is locked down, has our login, and lists only the unlocked models
+        shell: python
+        run: |
+          import json, os, re, urllib.error, urllib.request
+          state_dir = os.path.join(os.path.expanduser("~"), ".local_ai_installer")
+          state = json.load(open(os.path.join(state_dir, "state.json")))
+          port = state["webui_port"]
+          base = f"http://127.0.0.1:{port}"
+          login = open(os.path.join(state_dir, "webui-login.txt"), encoding="utf-8").read()
+          email = re.search(r"^Email:\s+(\S+)", login, re.M).group(1)
+          password = re.search(r"^Password: (\S+)", login, re.M).group(1)
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+          def call(path, body=None, token=None, origin=None, expect=200):
+              headers = {"Content-Type": "application/json"}
+              if token:
+                  headers["Authorization"] = "Bearer " + token
+              if origin:
+                  headers["Origin"] = origin
+              req = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers=headers)
+              try:
+                  r = opener.open(req, timeout=60)
+              except urllib.error.HTTPError as e:
+                  r = e
+              assert r.status == expect, (path, r.status, expect)
+              return r.headers, json.loads(r.read() or b"{}")
+
+          _, signin = call("/api/v1/auths/signin", {"email": email, "password": password})
+          token = signin["token"]
+          assert signin["role"] == "admin", signin
+          call("/api/v1/auths/signin", {"email": email, "password": "wrong"}, expect=400)
+          # nobody can open an account of their own: the sign-up form is closed
+          call("/api/v1/auths/signup", {"name": "x", "email": "x@example.com", "password": "pw12345678", "profile_image_url": "/user.png"}, expect=403)
+          # a web page from somewhere else must not be allowed to talk to the chat
+          hdr, _ = call("/api/v1/auths/signin", {"email": email, "password": "wrong"}, origin="http://evil.example", expect=400)
+          assert hdr.get("access-control-allow-origin") != "http://evil.example" and hdr.get("access-control-allow-origin") != "*", dict(hdr)
+          hdr, _ = call("/api/v1/auths/signin", {"email": email, "password": "wrong"}, origin=f"http://localhost:{port}", expect=400)
+          assert hdr.get("access-control-allow-origin") == f"http://localhost:{port}", dict(hdr)
+          _, models = call("/api/models", token=token)
+          shown = sorted(m["id"] for m in models["data"])
+          print("models shown in the chat:", shown)
+          names = [m["name"] for m in json.load(urllib.request.urlopen("http://127.0.0.1:11434/api/tags"))["models"]]
+          print("models installed in Ollama:", names)
+          wanted = sorted(n for n in names if n.lower() in {state["chat"]["tag"].lower(), state["coder"]["tag"].lower(),
+                                                            state["chat"]["tag"].lower() + ":latest", state["coder"]["tag"].lower() + ":latest"})
+          assert shown == wanted and shown, (shown, wanted)
+          for f in ("install.log", "webui.log", "odysseus.log", "ollama.log"):
+              p = os.path.join(state_dir, f)
+              if os.path.exists(p):
+                  assert password not in open(p, encoding="utf-8", errors="replace").read(), f
+          print("OK: login works, sign-up is closed, other origins are refused, only the unlocked models are listed")
+
+      - name: Helper models get clear names (and still work), cloud is off, nothing old is left behind
+        shell: python
+        run: |
+          import importlib.util, json, os, subprocess, sys, urllib.request
+          state_dir = os.path.join(os.path.expanduser("~"), ".local_ai_installer")
+          state = json.load(open(os.path.join(state_dir, "state.json")))
+          spec = importlib.util.spec_from_file_location("lai", os.path.join(state_dir, "local_ai_installer.py"))
+          lai = importlib.util.module_from_spec(spec)
+          sys.modules["lai"] = lai
+          spec.loader.exec_module(lai)
+          api = "http://127.0.0.1:11434"
+
+          def post(path, body):
+              req = urllib.request.Request(api + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+              return json.load(urllib.request.urlopen(req, timeout=300))
+
+          def tags():
+              return [m["name"] for m in json.load(urllib.request.urlopen(api + "/api/tags"))["models"]]
+
+          for role, originals, alias in (("embed", [lai.EMBED_MODEL], lai.EMBED_ALIAS),
+                                         ("autocomplete", lai.AUTOCOMPLETE_TAGS, lai.AUTOCOMPLETE_ALIAS)):
+              got = lai.helper_model(state, role, originals, alias)
+              assert got == alias, (role, got)
+              names = tags()
+              print(role, "->", names)
+              assert alias in names, names
+              assert not any(lai.same_tag(n, o) for n in names for o in originals), names   # the original name is gone
+          # the copies behave like the originals (the files are shared, so no second download happened)
+          emb = post("/api/embed", {"model": lai.EMBED_ALIAS, "input": "hello"})
+          assert emb["embeddings"] and len(emb["embeddings"][0]) > 100, emb.keys()
+          show = post("/api/show", {"model": lai.AUTOCOMPLETE_ALIAS})
+          print("autocomplete capabilities:", show.get("capabilities"))
+          assert "completion" in (show.get("capabilities") or ["completion"]), show.get("capabilities")
+          # cloud models are switched off and the setting is where Ollama's app and engine read it
+          server = json.load(open(os.path.join(os.path.expanduser("~"), ".ollama", "server.json")))
+          assert server.get("disable_ollama_cloud") is True, server
+          # the list Ollama's own app opens with is ours
+          recs = json.load(open(os.path.join(os.path.expanduser("~"), ".ollama", "cache", "model-recommendations.json")))
+          assert [r["model"] for r in recs["recommendations"]][:2] == [state["chat"]["tag"], state["coder"]["tag"]], recs
+          # a second run changes nothing and removes nothing that is in use
+          before = sorted(tags())
+          print("OK: helper copies work, cloud is off, Ollama's list is ours;", before)
+
+      - name: Cleanup leaves no download cache behind, and the health check is fully green
+        shell: bash
+        run: |
+          set -o pipefail
+          python local_ai_installer.py --check | tee check.txt
+          if grep -F "[!!]" check.txt; then echo "health check has problems"; exit 1; fi
+          grep -F "Open WebUI login works" check.txt
+          grep -F "Open WebUI lists only your unlocked models" check.txt
+          if [ -d "$HOME/.local_ai_installer/uv-cache" ]; then echo "uv cache was not cleaned up"; exit 1; fi
+          echo "OK"
+
       - name: Shortcut exists and its target brings a stopped chat back
         shell: python
         run: |

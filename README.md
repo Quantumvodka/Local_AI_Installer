@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/mai
 ## What you get
 
 1. **Detects** your OS, CPU, RAM and graphics card (NVIDIA, AMD, Apple Silicon, or CPU-only) and how much memory the AI can use.
-2. **Researches live** on Hugging Face for the newest unlocked models that fit that memory (see "How the research works"), with a built-in fallback list if you're offline.
+2. **Researches live** on Hugging Face for the newest unlocked models that fit that memory (see "How the research works"), with a built-in fallback list if you're offline. It only ever installs **unlocked** models: it tests that they really answer instead of refusing, and never falls back to a standard censored one unless you add `--allow-standard`.
 3. **Installs**:
    - **Ollama**: the engine that runs the models (uses your GPU automatically).
    - **A coding model, a chat model, a small fast autocomplete model** and a code-search model.
@@ -38,7 +38,11 @@ curl -fsSL https://raw.githubusercontent.com/Quantumvodka/Local_AI_Installer/mai
 4. **Checks everything works** (asks each model a question, tests the chat page) and fixes what it can.
 5. **Opens the chat** and puts a **"Local AI Chat"** shortcut on your Desktop and Start menu for next time.
 
-First time in the chat: click **Get started** and create a local account. It stays on your PC.
+**One place to chat:** the page that opens (http://localhost:3210), also the **Local AI Chat** shortcut. The installer creates your login so you never see the sign-up form: the email and password are shown at the end and saved in `~/.local_ai_installer/webui-login.txt`; change the password inside the chat (Settings -> Account). Everything else below is optional.
+
+**Which model do I pick?** The model list in the chat shows only your unlocked models: one for everyday chat, one for coding (and PewDiePie's Ajax once it's out). The small helper models VS Code uses (autocomplete, code search) are named `helper/...-only-...` and hidden from the list: they aren't for chatting.
+
+**Ollama's own window:** installing Ollama can open its own little chat app. That is just the engine: close it. The installer switches Ollama's cloud models off (they aren't on your PC and aren't unlocked) and keeps that window from opening on updates.
 
 Optional extras (the installer asks; or pass the option):
 
@@ -85,12 +89,14 @@ GitHub uses GitHub's official connector ([github-mcp-server](https://github.com/
 
 ## Updating
 
-Run the same download again. It finds your install and, only if a new model scores at least 10% better than yours, downloads it, updates Ollama and Open WebUI, checks it works, then offers to delete the old model (`--prune` does it automatically). It also checks for PewDiePie's Ajax and, if you have them, updates Odysseus and the GitHub connector. The `.exe` also downloads the newest installer logic by itself when one is published.
+Run the same download again. It finds your install and, only if a new model scores at least 10% better than yours, downloads it, updates Ollama (only when a newer version exists) and Open WebUI, and checks it works. It also checks for PewDiePie's Ajax and, if you have them, updates Odysseus and the GitHub connector. The `.exe` also downloads the newest installer logic by itself when one is published.
+
+**It cleans up after itself** once everything works: models it downloaded earlier that nothing uses any more (`--keep-old` to keep them), the package download cache (several GB), leftover installers, and half-finished downloads. It only removes what it created: models you installed yourself, your chats and your projects are never touched. If the new model doesn't work out, the one you have stays.
 
 Your stuff is never touched:
 - **Chats and settings** live in `~/.local_ai_installer/webui-data` and survive every update. New models simply appear in the model list; older chats keep their original model name, so pick the new model from the dropdown to continue them.
 - **Odysseus's chats, settings and login** live in `~/.local_ai_installer/odysseus-data`, separate from the program, so updates keep them.
-- **VS Code / Continue** is re-pointed at the new models. If you edited `~/.continue/config.yaml` yourself, it is left alone.
+- **VS Code / Continue** is re-pointed at the new models. If you edited `~/.continue/config.yaml` yourself, it is left alone (a config that Continue itself rewrote is replaced, and the old one is kept as `config.yaml.lai-<time>.bak`). In Continue's "get started" card, close it: don't press "Use local models", which would add a standard Llama model.
 - **Your code and projects** are never stored by this tool.
 
 GitHub write access (`--github-write`) is only kept for the run that asks for it: run the installer without it and your AI goes back to read-only.
@@ -115,19 +121,22 @@ The installer shows how much space it needs and stops if you don't have enough. 
 --no-webui  --no-vscode  --no-open  --no-shortcut
 --models-dir DIR  store models on another local drive
 --max-gb N        never pick models needing more than N GB (slow PCs)
---prune           delete the old model after an upgrade
+--keep-old        don't delete models this installer downloaded earlier and no longer uses
+--allow-standard  if no unlocked model works, allow a standard one (it will have refusals)
+--no-odysseus     uninstall Odysseus (chats and login are kept) so the chat page is the only place
 ```
 
 ## How the research works
 
-It searches Hugging Face for GGUF models tagged abliterated / uncensored / dolphin / heretic / josiefied / unfiltered (no older than 20 months), reads each repo's real file sizes, keeps only quantizations that fit your usable memory (85%, leaving room for context), and ranks them by **parameters x quality of quantization x recency (halves every 9 months) x popularity**. The winner is downloaded with `ollama pull hf.co/<repo>:<quant>`; if that fails the next one is tried, then the built-in list.
+It searches Hugging Face for GGUF models tagged abliterated / uncensored / dolphin / heretic / josiefied / unfiltered (no older than 20 months), reads each repo's real file sizes, keeps only quantizations that fit your usable memory (85%, leaving room for context), and ranks them by **parameters x quality of quantization x recency (halves every 9 months) x popularity**. The winner is downloaded with `ollama pull hf.co/<repo>:<quant>`; if that fails the next one is tried, then the built-in list of unlocked models. Each model must then answer a test question and **pass a refusal check** (three harmless requests that censored models tend to turn down; refusing two of them means it is not really unlocked and the next one is tried). Gemma 4 models that print raw `<|channel>thought` text are fixed with a copy that Ollama understands, or skipped.
 
 This is a heuristic, not a benchmark: nobody publishes a trustworthy "best unlocked model for your PC" ranking, so newer + bigger-that-fits + popular is a good proxy, not a guarantee. CPU-only PCs are capped at about 7 GB models because anything bigger is painfully slow.
 
 ## Troubleshooting
 
 - Everything the installer does is written to **`~/.local_ai_installer/install.log`** (on Windows: `%USERPROFILE%\.local_ai_installer\install.log`). Open WebUI's own log is `webui.log` next to it, Odysseus's is `odysseus.log`. Send those if something fails (`odysseus-login.txt` holds your password: don't send that one).
-- `--check` re-tests everything and restarts whatever stopped.
+- `--check` re-tests everything and restarts whatever stopped (including that your chat login works and the model list is tidy).
+- To remove the extra places to chat: `--no-odysseus`. In PowerShell, run `$env:LAI_ARGS="--no-odysseus"` before the one-line install command.
 - The chat and Odysseus are only reachable from your own PC (they listen on `127.0.0.1`).
 
 ## Safety and licence
